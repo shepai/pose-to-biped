@@ -1,6 +1,6 @@
 import mujoco
 import mujoco.viewer
-
+import numpy as np
 
 class MujocoSimulator:
     def __init__(self, xml_path: str):
@@ -9,13 +9,19 @@ class MujocoSimulator:
         print("Number of joints:", self.model.njnt)
         print("Number of degrees of freedom (qpos):", self.model.nq)
         print("Number of actuators:", self.model.nu)
-    def set_position(self, qpos):
-        """
-        Set the generalized positions.
-        qpos should match the model's joint dimension.
-        """
-        self.data.qpos[:] = qpos
-        mujoco.mj_forward(self.model, self.data)
+        joint_start = self.model.nq - self.model.nu
+        joint_end = self.model.nq
+        self.initial=self.data.qpos[:]
+        self.initial = self.initial[joint_start:joint_end]
+    def set_position(self, target_qpos, kp=200.0, kd=50.0):
+        joint_qpos_start = self.model.nq - self.model.nu
+        joint_qvel_start = self.model.nv - self.model.nu
+
+        pos_error = target_qpos - self.data.qpos[joint_qpos_start:]
+        vel_error = -self.data.qvel[joint_qvel_start:]
+
+        torque = kp * pos_error + kd * vel_error
+        self.data.ctrl[:] = torque
 
     def set_step(self, n_steps: int = 1):
         """
@@ -28,10 +34,11 @@ class MujocoSimulator:
         """
         Launch the passive viewer and run the simulation loop.
         """
-        self.set_position([0 for i in range(26)])
+        j=0
         with mujoco.viewer.launch_passive(self.model, self.data) as viewer:
             while viewer.is_running():
-                
+                j+=1
+                self.set_position(self.initial+(j/10000))
                 mujoco.mj_step(self.model, self.data)
                 viewer.sync()
 
