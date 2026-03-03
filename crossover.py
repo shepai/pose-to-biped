@@ -24,7 +24,9 @@ if __name__ == "__main__":
             print(landmarks.shape)
             plt.cla()
             ax = extractor.plot_world_landmarks(landmarks, ax)
-            sim.set_position(sim.initial+(j/10000))
+            if j>2:
+                angles=extractor.compute_joint_angle_changes(PARENTS)   
+                sim.set_position(angles)
             sim.set_step(10)
             viewer.sync()       
             plt.pause(0.005)
