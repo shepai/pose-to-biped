@@ -73,51 +73,67 @@ class PoseExtractor:
 
     def close(self):
         self.pose.close()
-    def draw(self, image_bgr, landmarks, visibility_threshold=0.0):
+    def plot_world_landmarks(self, landmarks, ax):
         """
-        Draw only valid landmarks and valid connections.
-
-        Args:
-            image_bgr: original image
-            landmarks: (33,4) array from process()
-            visibility_threshold: only draw points above this visibility
+        3D visualization for world landmarks (meters).
+        Safely handles None and corrupted inputs.
         """
+        ax.set_xlim([-1, 1])
+        ax.set_ylim([-1, 1])
+        ax.set_zlim([-1, 1])
+        if landmarks is None:
+            return ax
 
-        image = image_bgr.copy()
-        h, w, _ = image.shape
+        try:
+            landmarks = np.array(landmarks)
+        except Exception:
+            return ax
+        
+        if landmarks.shape[0] != self.NUM_LANDMARKS:
+            return ax
 
+        # Extract valid points
         valid_mask = landmarks[:, 0] != self.missing_value
+        points = landmarks[valid_mask]
 
-        #Draw points
-        for i in range(self.NUM_LANDMARKS):
-            if valid_mask[i] and landmarks[i, 3] > visibility_threshold:
-                x = int(landmarks[i, 0] * w)
-                y = int(landmarks[i, 1] * h)
-                print(x,y)
-                cv2.circle(image, (x, y), 5, (0, 255, 0), -1)
+        if points.size == 0:
+            return ax
 
-        #Draw skeleton connections
+        x = points[:, 0]
+        y = points[:, 1]
+        z = points[:, 2]
+
+        ax.scatter(x, y, z, c="green")
+
+        # Draw skeleton connections
         for start, end in self.mp_pose.POSE_CONNECTIONS:
             if (
-                valid_mask[start]
+                start < len(valid_mask)
+                and end < len(valid_mask)
+                and valid_mask[start]
                 and valid_mask[end]
-                and landmarks[start, 3] > visibility_threshold
-                and landmarks[end, 3] > visibility_threshold
             ):
-                x1 = int(landmarks[start, 0] * w)
-                y1 = int(landmarks[start, 1] * h)
-                x2 = int(landmarks[end, 0] * w)
-                y2 = int(landmarks[end, 1] * h)
+                xs = [landmarks[start, 0], landmarks[end, 0]]
+                ys = [landmarks[start, 1], landmarks[end, 1]]
+                zs = [landmarks[start, 2], landmarks[end, 2]]
 
-                cv2.line(image, (x1, y1), (x2, y2), (255, 0, 0), 2)
+                ax.plot(xs, ys, zs, c="blue")
 
-        return image
+        ax.set_xlabel("X (m)")
+        ax.set_ylabel("Y (m)")
+        ax.set_zlabel("Z (m)")
+        ax.set_title("World Pose")
+
+        return ax
 
 if __name__=="__main__":
     import cv2
+    import matplotlib.pyplot as plt 
     extractor = PoseExtractor(missing_value=-1.0)
 
     cap = cv2.VideoCapture(0)
+    fig = plt.figure()
+    ax = fig.add_subplot(111, projection="3d")
 
     while True:
         ret, frame = cap.read()
@@ -126,9 +142,10 @@ if __name__=="__main__":
 
         landmarks = extractor.process(frame)
         print(landmarks.shape)
-        frame_vis = extractor.draw(frame, landmarks, visibility_threshold=0.5)
-
-        cv2.imshow("Webcam", frame_vis)
+        plt.cla()
+        ax = extractor.plot_world_landmarks(landmarks, ax)
+        plt.pause(0.05)
+        cv2.imshow("Webcam", frame)
 
         if cv2.waitKey(1) & 0xFF == 27:
             break
