@@ -2,7 +2,26 @@ import cv2
 import mediapipe as mp
 import numpy as np
 
+PARENTS = {
+    # Upper body
+    11: 23,   # left shoulder  ← left hip
+    13: 11,   # left elbow     ← left shoulder
+    15: 13,   # left wrist     ← left elbow
 
+    12: 24,   # right shoulder ← right hip
+    14: 12,
+    16: 14,
+
+    # Lower body
+    25: 23,   # left knee  ← left hip
+    27: 25,   # left ankle ← left knee
+
+    26: 24,   # right knee
+    28: 26,
+
+    # Spine connection
+    23: 24,   # left hip  ← right hip (root link)
+}
 class PoseExtractor:
     """
     MediaPipe Pose wrapper that always returns a fixed-format vector.
@@ -34,7 +53,8 @@ class PoseExtractor:
             min_detection_confidence=min_detection_confidence,
             min_tracking_confidence=min_tracking_confidence,
         )
-
+        self.landmarks_prev=None
+        self.landmarks_curr=None
     def _empty_output(self):
         return np.full(
             (self.NUM_LANDMARKS, self.LANDMARK_DIM),
@@ -78,6 +98,7 @@ class PoseExtractor:
         3D visualization for world landmarks (meters).
         Safely handles None and corrupted inputs.
         """
+        self.landmarks_prev=self.landmarks_curr
         ax.set_xlim([-1, 1])
         ax.set_ylim([-1, 1])
         ax.set_zlim([-1, 1])
@@ -95,7 +116,7 @@ class PoseExtractor:
         # Extract valid points
         valid_mask = landmarks[:, 0] != self.missing_value
         points = landmarks[valid_mask]
-
+        self.landmarks_curr=points.copy()
         if points.size == 0:
             return ax
 
@@ -125,7 +146,32 @@ class PoseExtractor:
         ax.set_title("World Pose")
 
         return ax
+    def compute_joint_angle_changes(self, parents):
+        landmarks_prev=self.landmarks_prev
+        landmarks_curr=self.landmarks_curr
+        angle_changes = {}
 
+        for joint, parent in parents.items():
+            try:
+                # Bone vectors at t
+                v_prev = landmarks_prev[joint] - landmarks_prev[parent]
+                # Bone vectors at t+1
+                v_curr = landmarks_curr[joint] - landmarks_curr[parent]
+                # Skip degenerate bones
+                if np.linalg.norm(v_prev) < 1e-6 or np.linalg.norm(v_curr) < 1e-6:
+                    angle_changes[joint] = 0.0
+                    continue
+                # Normalize
+                v_prev = v_prev / np.linalg.norm(v_prev)
+                v_curr = v_curr / np.linalg.norm(v_curr)
+                # Angle between them
+                dot = np.clip(np.dot(v_prev, v_curr), -1.0, 1.0)
+                angle = np.arccos(dot)
+            except:
+                angle=0
+            angle_changes[joint] = angle
+
+        return angle_changes
 if __name__=="__main__":
     import cv2
     import matplotlib.pyplot as plt 
@@ -134,14 +180,17 @@ if __name__=="__main__":
     cap = cv2.VideoCapture(0)
     fig = plt.figure()
     ax = fig.add_subplot(111, projection="3d")
-
+    c=0
     while True:
         ret, frame = cap.read()
         if not ret:
             break
 
         landmarks = extractor.process(frame)
-        print(landmarks.shape)
+        c+=1
+        if c>2:
+            angles=extractor.compute_joint_angle_changes(PARENTS)
+            print(angles)
         plt.cla()
         ax = extractor.plot_world_landmarks(landmarks, ax)
         plt.pause(0.05)
