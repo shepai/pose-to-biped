@@ -48,5 +48,10 @@ if __name__ == "__main__":
     sim = MujocoSimulator(
         "C:/Users/dexte/Documents/mujoco_menagerie-main/mujoco_menagerie-main/unitree_h1/scene.xml"
     )
-    
-    sim.run()
+    j=0
+    with mujoco.viewer.launch_passive(sim.model, sim.data) as viewer:
+            while viewer.is_running():
+                j+=1
+                sim.set_position(sim.initial+(j/10000))
+                mujoco.mj_step(sim.model, sim.data)
+                viewer.sync()
