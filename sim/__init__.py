@@ -13,7 +13,10 @@ class MujocoSimulator:
         joint_end = self.model.nq
         self.initial=self.data.qpos[:]
         self.initial = self.initial[joint_start:joint_end]
-        self.mappting={}
+        self.mapping={}
+        self.names=[]
+        for i in range(self.model.njnt):
+            self.names=self.model.joint(i).name
     def set_position(self, target_qpos, kp=200.0, kd=50.0):
         joint_qpos_start = self.model.nq - self.model.nu
         joint_qvel_start = self.model.nv - self.model.nu
@@ -23,6 +26,7 @@ class MujocoSimulator:
 
         torque = kp * pos_error + kd * vel_error
         self.data.ctrl[:] = torque
+        
     def get_position(self):
         joint_qpos_start = self.model.nq - self.model.nu
         return self.data.qpos[joint_qpos_start:]
@@ -36,11 +40,20 @@ class MujocoSimulator:
         """
         Get the centre point, and map all limb coordinates to local
         """
-        pass 
         #get joint names 
+        for j in range(self.model.njnt):
+            joint = self.model.joint(j)
+            body_id = self.model.jnt_bodyid[j]
+            position = self.data.xpos[body_id]  # world position of the body
+            self.mapping[joint.name]= position
         #define centre point
+        p1=self.mapping['right_hip_roll']
+        p2=self.mapping['left_hip_roll']
+        centre= (p1 + p2) / 2.0
         #recalculate other points
-        return 0 #return points and centre
+        for key in self.mapping:
+            self.mapping[key]=self.mapping[key]-centre
+        return self.mapping #return points and centre
         
     def run(self):
         """
@@ -65,5 +78,6 @@ if __name__ == "__main__":
             while viewer.is_running():
                 j+=1
                 #sim.set_position(sim.initial+(j/10000))
-                mujoco.mj_step(sim.model, sim.data)
+                sim.set_step()
                 viewer.sync()
+                print(sim.get_local_coordinates())
