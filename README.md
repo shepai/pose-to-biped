@@ -8,6 +8,8 @@ pip install mujuco
 pip install --upgrade mujoco
 pip install opencv-python
 pip install pin-pink
+pip install osqp
 ```
+Be aware that pin-pink works better on Linux, we have not been able to get this running on Windows. This library is only needed for initial kinemtics work. 
 
 You will also need the xml files from <a href="https://github.com/google-deepmind/mujoco_menagerie/tree/main">here </a> or urdf files <a href="https://github.com/unitreerobotics/unitree_ros/tree/master">here</a>
