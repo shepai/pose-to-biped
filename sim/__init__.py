@@ -3,7 +3,7 @@ import mujoco.viewer
 import numpy as np
 
 class MujocoSimulator:
-    def __init__(self, xml_path: str):
+    def __init__(self, xml_path: str,gravity=True):
         self.model = mujoco.MjModel.from_xml_path(xml_path)
         self.data = mujoco.MjData(self.model)
         print("Number of joints:", self.model.njnt)
@@ -15,8 +15,15 @@ class MujocoSimulator:
         self.initial = self.initial[joint_start:joint_end]
         self.mapping={}
         self.names=[]
+        self.gravity=gravity
+        if not gravity:
+            self.model.opt.gravity[:] = [0, 0, 0]
         for i in range(self.model.njnt):
             self.names=self.model.joint(i).name
+    def reset(self):
+        mujoco.mj_resetData(self.model, self.data)
+        if not self.gravity:
+            self.model.opt.gravity[:] = [0, 0, 0]
     def set_position(self, target_qpos, kp=200.0, kd=50.0):
         joint_qpos_start = self.model.nq - self.model.nu
         joint_qvel_start = self.model.nv - self.model.nu
@@ -66,6 +73,17 @@ class MujocoSimulator:
                 self.set_position(self.initial+(j/10000))
                 mujoco.mj_step(self.model, self.data)
                 viewer.sync()
+    def get_state(self):
+        state = {
+            "qpos": self.data.qpos.copy(),
+            "qvel": self.data.qvel.copy(),
+            "act": self.data.act.copy() if self.data.act is not None else None
+        }
+        return state
+    def set_state(self,state):
+        self.data.qpos=state["qpos"]
+        self.data.qvel=state["qvel"]
+        self.data.act=state["act"]
 
 
 # Example usage
@@ -77,7 +95,8 @@ if __name__ == "__main__":
     with mujoco.viewer.launch_passive(sim.model, sim.data) as viewer:
             while viewer.is_running():
                 j+=1
-                #sim.set_position(sim.initial+(j/10000))
+                if j<400:
+                    sim.set_position(sim.initial+(j/10000))
                 sim.set_step()
                 viewer.sync()
-                print(sim.get_local_coordinates())
+                #print(sim.get_local_coordinates())
