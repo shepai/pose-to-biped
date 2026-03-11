@@ -13,7 +13,6 @@ from pink.tasks import ComTask, FrameTask, PostureTask
 from pink.visualization import start_meshcat_visualizer
 import imageio
 
-
 sim = MujocoSimulator(
     "/its/home/drs25/mujoco-menagerie-main/unitree_h1/scene.xml",
     gravity=0
@@ -21,9 +20,6 @@ sim = MujocoSimulator(
 model = pin.buildModelFromUrdf("/its/home/drs25/unitree_ros/robots/h1_description/urdf/h1_with_hand.urdf")
 data = model.createData()
 q = pin.neutral(model)  # default joint positions
-
-"""pin.computeJointJacobians(model, data, q)
-pin.updateFramePlacements(model, data)"""
 
 configuration = pink.Configuration(model, data, q)
 pelvis_orientation_task = FrameTask(
@@ -103,6 +99,7 @@ while True:
         # Update MuJoCo kinematics
         for i in range(10):
             mujoco.mj_forward(sim.model, sim.data)
+        
         renderer.update_scene(sim.data)
         pixels = renderer.render()
 

@@ -83,8 +83,8 @@ class MujocoSimulator:
     def map_move(self, joint_dict):
         for i in range(self.model.njnt):
             mj_name=self.model.joint(i).name
-            if mj_name in joint_dict:
-                self.data.qpos[i] = joint_dict[mj_name]
+            if mj_name+"_joint" in list(joint_dict.keys()):
+                self.data.qpos[i] = joint_dict[mj_name+"_joint"]
     def set_state(self,state):
         self.data.qpos=state["qpos"]
         self.data.qvel=state["qvel"]
