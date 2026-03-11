@@ -1,3 +1,5 @@
+import os
+os.environ["MUJOCO_GL"] = "egl"
 import mujoco
 import mujoco.viewer
 from __init__ import MujocoSimulator
@@ -9,6 +11,8 @@ import pink
 from pink import solve_ik
 from pink.tasks import ComTask, FrameTask, PostureTask
 from pink.visualization import start_meshcat_visualizer
+import imageio
+
 
 sim = MujocoSimulator(
     "/its/home/drs25/mujoco-menagerie-main/unitree_h1/scene.xml",
@@ -63,8 +67,12 @@ dt = rate.period
 t = 0.0  # [s]
 period = 2
 omega = 2 * np.pi / period
-with mujoco.viewer.launch_passive(sim.model, sim.data) as viewer:
-    while viewer.is_running():
+max_w = sim.model.vis.global_.offwidth
+max_h = sim.model.vis.global_.offheight
+renderer = mujoco.Renderer(sim.model, height=max_h, width=max_w)
+frame_id = 0
+save_every = 1000   # save every 50 simulation steps
+while True:
         # Update CoM target
         Az = 0.05
         desired_com = np.zeros(3)
@@ -83,8 +91,22 @@ with mujoco.viewer.launch_passive(sim.model, sim.data) as viewer:
 
         rate.sleep()
         t += dt
-        sim.data.qpos[:] = configuration.q
+        dic = {}
+        for joint in model.names:  # skip universe
+            joint_id = model.getJointId(joint)
+            q_start = model.joints[joint_id].idx_q
+            q_size = model.joints[joint_id].nq
+            joint_q = configuration.q[q_start : q_start + q_size]
+            dic[joint]=joint_q
+        sim.map_move(dic)
 
         # Update MuJoCo kinematics
-        mujoco.mj_forward(sim.model, sim.data)
-        viewer.sync()
+        for i in range(10):
+            mujoco.mj_forward(sim.model, sim.data)
+        renderer.update_scene(sim.data)
+        pixels = renderer.render()
+
+        if frame_id % save_every == 0 and frame_id<10000:
+            imageio.imwrite(f"/its/home/drs25/pose-to-biped/assets/snapshots/frame_{frame_id:05d}.png", pixels)
+
+        frame_id += 1
