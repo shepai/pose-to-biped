@@ -36,12 +36,12 @@ class kinematics_tranfser:
                 orientation_cost=0.0,  # [cost] / [rad]
             )
             tasks.append(task)
-        for task in tasks:
+        for j,task in enumerate(tasks):
             task.set_target_from_configuration(self.configuration)
             if isinstance(task, FrameTask):
                 target = task.transform_target_to_world
                 if task.frame in joint_names:
-                    target.translation += np.array([-0.1, 0.5, 0.5])
+                    target.translation += targets[j]
                     task.set_target(target)
         solver = qpsolvers.available_solvers[0]
         if "osqp" in qpsolvers.available_solvers:
@@ -92,7 +92,7 @@ if __name__=="__main__":
     frame_id = 0
     save_every = 1000   # save every 50 simulation steps
     while True:
-        movements=ki_mod.move_to()
+        movements=ki_mod.move_to(targets=np.array([[0, -0.01, 0],[0, 0.01, 0]]))
         # Update CoM target
         for dic in movements:
             sim.map_move(dic)
