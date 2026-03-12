@@ -13,3 +13,5 @@ pip install osqp
 Be aware that pin-pink works better on Linux, we have not been able to get this running on Windows. This library is only needed for initial kinemtics work. 
 
 You will also need the xml files from <a href="https://github.com/google-deepmind/mujoco_menagerie/tree/main">here </a> or urdf files <a href="https://github.com/unitreerobotics/unitree_ros/tree/master">here</a>
+
+For the kinematics we edited the xml file so the robot would stay welded up right, and we could focus on joint position movement. See /Robots for thsoe files. You will still need to use the meshes from the above repo link. 
