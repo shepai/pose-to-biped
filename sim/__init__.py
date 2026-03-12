@@ -17,7 +17,8 @@ class MujocoSimulator:
         self.names=[]
         self.gravity=gravity
         if not gravity:
-            self.model.opt.gravity[:] = [0, 0, 0]
+            #self.model.opt.gravity[:] = [0, 0, 0]
+            pass
         for i in range(self.model.njnt):
             self.names=self.model.joint(i).name
     def reset(self):
@@ -81,10 +82,22 @@ class MujocoSimulator:
         }
         return state
     def map_move(self, joint_dict):
-        for i in range(self.model.njnt):
-            mj_name=self.model.joint(i).name
-            if mj_name+"_joint" in list(joint_dict.keys()):
-                self.data.qpos[i] = joint_dict[mj_name+"_joint"]
+        for name, value in joint_dict.items():
+            # Clean the name if your URDF names have "_joint" suffix but MuJoCo doesn't
+            mj_name = name.replace("_joint", "")
+            
+            try:
+                # Get the correct ID for this specific joint name
+                joint_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, mj_name)
+                
+                if joint_id != -1:
+                    # Get the starting address of this joint's data in qpos
+                    qpos_adr = self.model.jnt_qposadr[joint_id]
+                    # Map the value (ensure it's the right size, e.g., 1 for hinge, 7 for freejoint)
+                    self.data.qpos[qpos_adr : qpos_adr + len(np.atleast_1d(value))] = value
+            except ValueError:
+                # This skips names that exist in Pinocchio but not in MuJoCo (like the frozen_part)
+                continue
     def set_state(self,state):
         self.data.qpos=state["qpos"]
         self.data.qvel=state["qvel"]

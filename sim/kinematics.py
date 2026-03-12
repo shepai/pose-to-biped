@@ -22,12 +22,12 @@ data = model.createData()
 q = pin.neutral(model)  # default joint positions
 
 configuration = pink.Configuration(model, data, q)
-pelvis_orientation_task = FrameTask(
+"""pelvis_orientation_task = FrameTask(
         "pelvis",
         position_cost=0.0,  # [cost] / [m]
         orientation_cost=10.0,  # [cost] / [rad]
     )
-
+"""
 com_task = ComTask(cost=200.0)
 com_task.set_target_from_configuration(configuration)
 
@@ -35,7 +35,7 @@ posture_task = PostureTask(
     cost=1e-1,  # [cost] / [rad]
 )
 
-tasks = [pelvis_orientation_task, posture_task, com_task]
+tasks = [] #pelvis_orientation_task, 
 
 for arm_points in ["right_hand_link", "left_hand_link"]:
     task = FrameTask(
@@ -44,7 +44,14 @@ for arm_points in ["right_hand_link", "left_hand_link"]:
         orientation_cost=0.0,  # [cost] / [rad]
     )
     tasks.append(task)
-
+"""pelvis_task = FrameTask(
+    "pelvis",
+    position_cost=100.0,    # Increase this!
+    orientation_cost=100.0, # Keep the robot upright
+)
+# Set the current pelvis position as the "anchor"
+pelvis_task.set_target_from_configuration(configuration)
+tasks.append(pelvis_task)"""
 for task in tasks:
     task.set_target_from_configuration(configuration)
     if isinstance(task, FrameTask):
@@ -95,11 +102,9 @@ while True:
             joint_q = configuration.q[q_start : q_start + q_size]
             dic[joint]=joint_q
         sim.map_move(dic)
-
         # Update MuJoCo kinematics
-        for i in range(10):
+        for i in range(1):
             mujoco.mj_forward(sim.model, sim.data)
-        
         renderer.update_scene(sim.data)
         pixels = renderer.render()
 
