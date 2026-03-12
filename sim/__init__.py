@@ -62,7 +62,20 @@ class MujocoSimulator:
         for key in self.mapping:
             self.mapping[key]=self.mapping[key]-centre
         return self.mapping #return points and centre
-        
+    def convert_normal_coordinates(self,coords):
+        #get joint names 
+        for j in range(self.model.njnt):
+            joint = self.model.joint(j)
+            body_id = self.model.jnt_bodyid[j]
+            position = self.data.xpos[body_id]  # world position of the body
+            self.mapping[joint.name]= position
+        #define centre point
+        p1=self.mapping['right_hip_roll']
+        p2=self.mapping['left_hip_roll']
+        centre= (p1 + p2) / 2.0
+        for key in range(len(coords)):
+            coords[key]=coords[key]+centre
+        return coords #return points and centre
     def run(self):
         """
         Launch the passive viewer and run the simulation loop.
