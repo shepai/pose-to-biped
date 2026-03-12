@@ -1,17 +1,10 @@
-import os
-os.environ["MUJOCO_GL"] = "egl"
-import mujoco
-import mujoco.viewer
-from __init__ import MujocoSimulator
 import numpy as np
 import pinocchio as pin
 import qpsolvers
 from loop_rate_limiters import RateLimiter
 import pink
 from pink import solve_ik
-from pink.tasks import ComTask, FrameTask, PostureTask
-from pink.visualization import start_meshcat_visualizer
-import imageio
+from pink.tasks import ComTask, FrameTask
 
 class kinematics_tranfser:
     def __init__(self,path_ro_urdf): #set up humanoid chassis
@@ -81,6 +74,12 @@ class kinematics_tranfser:
     
 
 if __name__=="__main__":
+    import os
+    os.environ["MUJOCO_GL"] = "egl"
+    import mujoco
+    import mujoco.viewer
+    import imageio
+    from __init__ import MujocoSimulator
     sim = MujocoSimulator(
         "/its/home/drs25/mujoco-menagerie-main/unitree_h1/scene.xml",
         gravity=0
