@@ -92,7 +92,8 @@ if __name__=="__main__":
     frame_id = 0
     save_every = 1000   # save every 50 simulation steps
     while True:
-        movements=ki_mod.move_to(targets=np.array([[0, -0.01, 0],[0, 0.01, 0]]))
+        movements=ki_mod.move_to(["right_hand_link", "left_hand_link", "right_ankle_link","left_ankle_link"],
+            targets=np.array([[0, -0.01, 0],[0, 0.01, 0],[0, 0.01, 0.05],[0, 0.01, 0]]))
         # Update CoM target
         for dic in movements:
             sim.map_move(dic)
