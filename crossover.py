@@ -14,7 +14,7 @@ if __name__ == "__main__":
     fig = plt.figure()
     ax = fig.add_subplot(111, projection="3d")
     sim = MujocoSimulator(
-            "C:/Users/dexte/Documents/mujoco_menagerie-main/mujoco_menagerie-main/unitree_h1/scene.xml"
+            "/its/home/drs25/mujoco-menagerie-main/unitree_h1/scene.xml"
         )
     j=0
     ki_mod=kinematics_tranfser("/its/home/drs25/unitree_ros/robots/h1_description/urdf/h1_with_hand.urdf")
