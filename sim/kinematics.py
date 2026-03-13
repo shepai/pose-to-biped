@@ -77,7 +77,6 @@ if __name__=="__main__":
     import os
     os.environ["MUJOCO_GL"] = "egl"
     import mujoco
-    import mujoco.viewer
     import imageio
     from __init__ import MujocoSimulator
     sim = MujocoSimulator(

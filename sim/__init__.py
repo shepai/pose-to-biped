@@ -62,6 +62,26 @@ class MujocoSimulator:
         for key in self.mapping:
             self.mapping[key]=self.mapping[key]-centre
         return self.mapping #return points and centre
+    def gethips(self):
+        for j in range(self.model.njnt):
+            joint = self.model.joint(j)
+            body_id = self.model.jnt_bodyid[j]
+            position = self.data.xpos[body_id]  # world position of the body
+            self.mapping[joint.name]= position
+        p1=self.mapping['right_hip_roll']
+        p2=self.mapping['left_hip_roll']
+        return (p1 + p2) / 2.0
+    def get_trajectories(self,names,coords): #get the trajectory between specific points
+        traj=[]
+        for j in range(self.model.njnt):
+            joint = self.model.joint(j)
+            body_id = self.model.jnt_bodyid[j]
+            position = self.data.xpos[body_id]  # world position of the body
+            self.mapping[joint.name]= position
+        for i in range(len(names)):
+            v=self.mapping[names[i]]-coords[i]
+            traj.append(v)
+        return traj
     def convert_normal_coordinates(self,coords):
         #get joint names 
         for j in range(self.model.njnt):

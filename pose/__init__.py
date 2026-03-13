@@ -61,7 +61,7 @@ class PoseExtractor:
             self.missing_value,
             dtype=np.float32,
         )
-    def to_local_space(landmarks, missing_value=-1.0):
+    def to_local_space(self, landmarks, missing_value=-1.0):
         """
         Converts world landmarks to root-centered local coordinates.
 
@@ -71,23 +71,20 @@ class PoseExtractor:
             local_landmarks: (33,4) array (root-centered)
             root: (3,) torso midpoint
         """
-        if landmarks is None or len(landmarks) != 33:
+        if len(landmarks) != 33:
             return None, None
-
-        # Copy to avoid modifying original
         local_landmarks = landmarks.copy()
-
         # Get torso points (left and right hip)
         left_hip = landmarks[23, :3]
         right_hip = landmarks[24, :3]
-
+        
         # Check for missing hips
         if (
             np.any(left_hip == missing_value)
             or np.any(right_hip == missing_value)
         ):
             return None, None
-
+        
         # Compute midpoint
         root = (left_hip + right_hip) / 2.0
 

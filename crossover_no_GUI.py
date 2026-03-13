@@ -34,8 +34,11 @@ if __name__ == "__main__":
         landmarks,_=extractor.to_local_space(landmarks)
         landmarks=landmarks[:,:3]
         #get the hand and ankle links
+        hips=sim.gethips()
+        landmarks=landmarks+hips
+        trajectories=sim.get_trajectories(["right_elbow", "left_elbow", "right_ankle","left_ankle"],[landmarks[16],landmarks[15],landmarks[28],landmarks[27]])
         movements=ki_mod.move_to(["right_hand_link", "left_hand_link", "right_ankle_link","left_ankle_link"],
-        targets=np.array([landmarks[16],landmarks[15],landmarks[28],landmarks[27]]))
+        targets=np.array(trajectories))
         #step through sim
         for dic in movements:
             sim.map_move(dic)
