@@ -1,5 +1,5 @@
 """
-This versionn of the code is designed to be run on device
+This versionn of the code is designed to be run over SSH to test the functions. 
 """
 from pose import PoseExtractor, PARENTS
 from sim import MujocoSimulator
@@ -18,8 +18,10 @@ if __name__ == "__main__":
         )
     j=0
     ki_mod=kinematics_tranfser("/its/home/drs25/unitree_ros/robots/h1_description/urdf/h1_with_hand.urdf")
-    with mujoco.viewer.launch_passive(sim.model, sim.data) as viewer:        
-        while viewer.is_running():
+    max_w = sim.model.vis.global_.offwidth
+    max_h = sim.model.vis.global_.offheight
+    renderer = mujoco.Renderer(sim.model, height=max_h, width=max_w)
+    while True:
             ret, frame = cap.read()
             if not ret:
                 break
@@ -36,7 +38,10 @@ if __name__ == "__main__":
                 for i in range(1):
                     sim.set_step(10)     
             plt.pause(0.005)
-            viewer.sync()
+            renderer.update_scene(sim.data)
+            pixels = renderer.render()
+            pixels = cv2.cvtColor(pixels, cv2.COLOR_RGB2BGR)
+            frame = np.concatenate((frame, pixels), axis=1)
             cv2.imshow("Webcam", frame)
 
             if cv2.waitKey(1) & 0xFF == 27:
