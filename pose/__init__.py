@@ -92,7 +92,8 @@ class PoseExtractor:
         for i in range(33):
             if not np.any(landmarks[i, :3] == missing_value):
                 local_landmarks[i, :3] -= root
-
+        local_landmarks[:,0]*=-1
+        local_landmarks[:,2]*=-1
         return local_landmarks, root
     def process(self, image_bgr, flatten=False):
         """
@@ -119,7 +120,7 @@ class PoseExtractor:
 
         if landmarks is not None:
             for i, lm in enumerate(landmarks.landmark):
-                output[i] = [lm.x, lm.y, lm.z, lm.visibility]
+                output[i] = [lm.z, lm.x, lm.y, lm.visibility]
 
         return output.flatten() if flatten else output
 
