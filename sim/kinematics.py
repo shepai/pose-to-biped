@@ -5,6 +5,7 @@ from loop_rate_limiters import RateLimiter
 import pink
 from pink import solve_ik
 from pink.tasks import ComTask, FrameTask
+from difflib import get_close_matches  # standard library fuzzy matching
 
 class kinematics_tranfser:
     def __init__(self,path_ro_urdf): #set up humanoid chassis
@@ -14,7 +15,6 @@ class kinematics_tranfser:
         self.configuration = pink.Configuration(self.model, self.data, self.q)
         self.com_task = ComTask(cost=200.0)
         self.com_task.set_target_from_configuration(self.configuration)
-
     def move_to(self,joint_names=["right_hand_link", "left_hand_link"],targets=np.array([[-0.1, 0.1, 0.5],[-0.1, 0.1, 0.5]]),max_iter=100): #calculate joint movements
         rate = RateLimiter(frequency=200.0, warn=False)
         dt = rate.period
@@ -67,11 +67,35 @@ class kinematics_tranfser:
                 dic[joint]=joint_q
             movements.append(dic)
         return movements
-    def get_transformations(self): #return the suggested movement array
-        pass 
-    def equalise_sims(self): #make sure the simulations both align at the end of each
-        pass 
-    
+    def equalise_sims(self, mujoco_sim): 
+        joints=mujoco_sim.get_coordinates()
+        mujoco_joint_names=list(joints.keys())
+        mujoco_qs=list(joints.values())
+        self.configuration.q = np.array(self.configuration.q, copy=True)
+        for joint_name in self.model.names:
+            if joint_name == "universe":
+                continue
+            # Fuzzy match
+            match = get_close_matches(joint_name, mujoco_joint_names, n=1, cutoff=0.5)
+            if not match:
+                continue
+            mujoco_joint_name = match[0]
+            mujoco_idx = mujoco_joint_names.index(mujoco_joint_name)
+            mujoco_q = mujoco_qs[mujoco_idx]
+
+            joint_id = self.model.getJointId(joint_name)
+            q_start = self.model.joints[joint_id].idx_q
+            q_size = self.model.joints[joint_id].nq
+
+            # Ensure mujoco_q is a NumPy array
+            mujoco_q = np.atleast_1d(mujoco_q)
+
+            # Assign slice directly
+            self.configuration.q[q_start : q_start + q_size] = mujoco_q[:q_size]
+
+        # Update Pinocchio internal data
+        pin.forwardKinematics(self.model, self.data, self.configuration.q)
+        self.configuration.update()
 
 if __name__=="__main__":
     import os
@@ -90,6 +114,7 @@ if __name__=="__main__":
     frame_id = 0
     save_every = 1000   # save every 50 simulation steps
     while True:
+        #ki_mod.equalise_sims(sim)
         movements=ki_mod.move_to(["right_hand_link", "left_hand_link", "right_ankle_link","left_ankle_link"],
             targets=np.array([[0, -0.01, 0],[0, 0.01, 0],[0, 0.01, 0.05],[0, 0.01, 0]]))
         # Update CoM target
@@ -102,4 +127,6 @@ if __name__=="__main__":
             pixels = renderer.render()
             if frame_id % save_every == 0 and frame_id<10000:
                 imageio.imwrite(f"/its/home/drs25/pose-to-biped/assets/snapshots/frame_{frame_id:05d}.png", pixels)
+                ki_mod.equalise_sims(sim)
             frame_id += 1
+        

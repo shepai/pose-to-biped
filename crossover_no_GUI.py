@@ -9,6 +9,7 @@ from sim.kinematics import kinematics_tranfser
 import numpy as np
 import mujoco
 import cv2
+import matplotlib.pyplot as plt
 
 if __name__ == "__main__":
     extractor = PoseExtractor(missing_value=-1.0)
@@ -24,36 +25,47 @@ if __name__ == "__main__":
     # Output video writer
     output_path = "/its/home/drs25/pose-to-biped/assets/output_record.mp4"
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-    out = cv2.VideoWriter(output_path, fourcc, 25, (1280, 480))
-
-    while j<10:
+    out = cv2.VideoWriter(output_path, fourcc, 25, (640*3, 480))
+    fig = plt.figure()
+    ax = fig.add_subplot(111, projection='3d')
+    SF=0.3
+    while j<100:
         ret, frame = cap.read()
         if not ret:
             break
         landmarks = extractor.process(frame)
         landmarks,_=extractor.to_local_space(landmarks)
-        landmarks=landmarks[:,:3]
-        #get the hand and ankle links
         hips=sim.gethips()
-        landmarks=landmarks+hips
-        trajectories=sim.get_trajectories(["right_elbow", "left_elbow", "right_ankle","left_ankle"],[landmarks[16],landmarks[15],landmarks[28],landmarks[27]])
+        landmarks=landmarks[:,:3] 
+        landmarks=(landmarks+hips) *SF
+        ax.cla()
+        ax=extractor.plot_world_landmarks(landmarks,ax,
+                                          points=sim.get_coords_of(["right_elbow", "left_elbow", "right_ankle","left_ankle"])*SF)
+        #get the hand and ankle links
+        trajectories=sim.get_trajectories(["right_elbow", "left_elbow", "right_ankle","left_ankle"],
+                                          [landmarks[14],landmarks[13],landmarks[28],landmarks[27]])
+        trajectories=[landmarks[14],landmarks[13],landmarks[28],landmarks[27]]
         movements=ki_mod.move_to(["right_hand_link", "left_hand_link", "right_ankle_link","left_ankle_link"],
-        targets=np.array(trajectories))
+        targets=np.array(trajectories),max_iter=100)
         #step through sim
         for dic in movements:
             sim.map_move(dic)
             # Update MuJoCo kinematics
-            for i in range(1):
-                sim.set_step(1)     
+            sim.set_step(5)     
         renderer.update_scene(sim.data)
         pixels = renderer.render()
         pixels = cv2.cvtColor(pixels, cv2.COLOR_RGB2BGR)
         frame = cv2.resize(frame, (640, 480))  # match webcam frame
-        frame = np.concatenate((frame, pixels), axis=1).astype(np.uint8)
+        fig.canvas.draw()
+        img = np.frombuffer(fig.canvas.tostring_rgb(), dtype=np.uint8)
+        img = img.reshape(fig.canvas.get_width_height()[::-1] + (3,))
+        img = cv2.resize(img, (640, 480))
+        frame = np.concatenate((frame, img, pixels), axis=1).astype(np.uint8)
         out.write(frame)
         cv2.imwrite("debug_frame.png", frame)
         j += 1
         print(f"Processed frame {j}")
+        ki_mod.equalise_sims(sim)
     renderer.close()
     out.release()       
     cap.release()

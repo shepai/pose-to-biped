@@ -126,7 +126,7 @@ class PoseExtractor:
 
     def close(self):
         self.pose.close()
-    def plot_world_landmarks(self, landmarks, ax):
+    def plot_world_landmarks(self, landmarks, ax, points=[],scale=True):
         """
         3D visualization for world landmarks (meters).
         Safely handles None and corrupted inputs.
@@ -148,17 +148,19 @@ class PoseExtractor:
 
         # Extract valid points
         valid_mask = landmarks[:, 0] != self.missing_value
-        points = landmarks[valid_mask]
-        self.landmarks_curr=points.copy()
-        if points.size == 0:
+        points_ = landmarks[valid_mask]
+        self.landmarks_curr=points_.copy()
+        if points_.size == 0:
             return ax
 
-        x = points[:, 0]
-        y = points[:, 1]
-        z = points[:, 2]
+        x = points_[:, 0]
+        y = points_[:, 1]
+        z = points_[:, 2]
 
         ax.scatter(x, y, z, c="green")
-
+        for i in range(len(points)):
+            point=points[i]
+            ax.scatter(point[0], point[1], point[2], c="red", s=30)
         # Draw skeleton connections
         for start, end in self.mp_pose.POSE_CONNECTIONS:
             if (
@@ -177,7 +179,21 @@ class PoseExtractor:
         ax.set_ylabel("Y (m)")
         ax.set_zlabel("Z (m)")
         ax.set_title("World Pose")
+        if scale:
+            x_range = landmarks[:,0].max() - landmarks[:,0].min()
+            y_range = landmarks[:,1].max() - landmarks[:,1].min()
+            z_range = landmarks[:,2].max() - landmarks[:,2].min()
+            max_range = max(x_range, y_range, z_range)
 
+            # Compute midpoints
+            x_mid = (landmarks[:,0].max() + landmarks[:,0].min()) / 2
+            y_mid = (landmarks[:,1].max() + landmarks[:,1].min()) / 2
+            z_mid = (landmarks[:,2].max() + landmarks[:,2].min()) / 2
+
+            # Set limits symmetrically around the midpoint
+            ax.set_xlim(x_mid - max_range/2, x_mid + max_range/2)
+            ax.set_ylim(y_mid - max_range/2, y_mid + max_range/2)
+            ax.set_zlim(z_mid - max_range/2, z_mid + max_range/2)
         return ax
     def compute_joint_angle_changes(self, parents):
         landmarks_prev=self.landmarks_prev

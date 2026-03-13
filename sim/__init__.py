@@ -45,11 +45,11 @@ class MujocoSimulator:
         for _ in range(n_steps):
             mujoco.mj_step(self.model, self.data)
     def get_coordinates(self):
+        self.mapping={}
         for j in range(self.model.njnt):
             joint = self.model.joint(j)
-            body_id = self.model.jnt_bodyid[j]
-            position = self.data.xpos[body_id]  # world position of the body
-            self.mapping[joint.name]= position
+            position = self.data.xanchor[j]  # world position of the body
+            self.mapping[joint.name] = position
         return self.mapping
     def get_local_coordinates(self):
         """
@@ -72,22 +72,21 @@ class MujocoSimulator:
         return (p1 + p2) / 2.0
     def get_trajectories(self,names,coords): #get the trajectory between specific points
         traj=[]
-        for j in range(self.model.njnt):
-            joint = self.model.joint(j)
-            body_id = self.model.jnt_bodyid[j]
-            position = self.data.xpos[body_id]  # world position of the body
-            self.mapping[joint.name]= position
+        self.mapping=self.get_coordinates()
         for i in range(len(names)):
             v=self.mapping[names[i]]-coords[i]
             traj.append(v)
         return traj
+    def get_coords_of(self,names):
+        self.mapping=self.get_coordinates()
+        return np.array([self.mapping[names[i]] for i in range(len(names))])
     def convert_normal_coordinates(self,coords):
         #get joint names 
         for j in range(self.model.njnt):
             joint = self.model.joint(j)
             body_id = self.model.jnt_bodyid[j]
             position = self.data.xpos[body_id]  # world position of the body
-            self.mapping[joint.name]= position
+            self.mapping[joint.name] = position
         #define centre point
         p1=self.mapping['right_hip_roll']
         p2=self.mapping['left_hip_roll']
