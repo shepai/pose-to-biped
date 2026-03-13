@@ -44,16 +44,19 @@ class MujocoSimulator:
         """
         for _ in range(n_steps):
             mujoco.mj_step(self.model, self.data)
-    def get_local_coordinates(self):
-        """
-        Get the centre point, and map all limb coordinates to local
-        """
-        #get joint names 
+    def get_coordinates(self):
         for j in range(self.model.njnt):
             joint = self.model.joint(j)
             body_id = self.model.jnt_bodyid[j]
             position = self.data.xpos[body_id]  # world position of the body
             self.mapping[joint.name]= position
+        return self.mapping
+    def get_local_coordinates(self):
+        """
+        Get the centre point, and map all limb coordinates to local
+        """
+        #get joint names 
+        self.mapping=self.get_coordinates()
         #define centre point
         p1=self.mapping['right_hip_roll']
         p2=self.mapping['left_hip_roll']
@@ -63,11 +66,7 @@ class MujocoSimulator:
             self.mapping[key]=self.mapping[key]-centre
         return self.mapping #return points and centre
     def gethips(self):
-        for j in range(self.model.njnt):
-            joint = self.model.joint(j)
-            body_id = self.model.jnt_bodyid[j]
-            position = self.data.xpos[body_id]  # world position of the body
-            self.mapping[joint.name]= position
+        self.mapping=self.get_coordinates()
         p1=self.mapping['right_hip_roll']
         p2=self.mapping['left_hip_roll']
         return (p1 + p2) / 2.0
