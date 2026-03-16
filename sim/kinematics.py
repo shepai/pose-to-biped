@@ -51,7 +51,7 @@ class kinematics_tranfser:
                 tasks,
                 dt,
                 solver=solver,
-                damping=0.01,
+                damping=0.05,
                 safety_break=False,
             )
             self.configuration.integrate_inplace(velocity, dt)

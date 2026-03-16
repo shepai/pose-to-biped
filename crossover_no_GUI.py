@@ -40,9 +40,9 @@ if __name__ == "__main__":
         landmarks=sim.align_human_to_robot(landmarks,np.array(list(sim.get_coordinates().values())))
         ax.cla()
         ax=extractor.plot_world_landmarks(landmarks,ax,
-                                          points=sim.get_coords_of(["right_elbow", "left_elbow", "right_ankle","left_ankle"]))
+                                          points=np.array(list(sim.get_coordinates().values())))#sim.get_coords_of(["right_elbow", "left_elbow", "right_ankle","left_ankle"]))
         #get the hand and ankle links
-        trajectories=sim.get_trajectories(["right_elbow", "left_elbow", "right_ankle","left_ankle"],
+        trajectories=sim.get_trajectories(["right_wrist", "left_wrist", "right_ankle","left_ankle"],
                                           [landmarks[14],landmarks[13],landmarks[28],landmarks[27]])
         #trajectories=[landmarks[14],landmarks[13],landmarks[28],landmarks[27]]
         movements = ki_mod.move_to(
@@ -68,7 +68,7 @@ if __name__ == "__main__":
         cv2.imwrite("debug_frame.png", frame)
         j += 1
         print(f"Processed frame {j}")
-        ki_mod.equalise_sims(sim)
+        #ki_mod.equalise_sims(sim)
     renderer.close()
     out.release()       
     cap.release()

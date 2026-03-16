@@ -72,12 +72,14 @@ class MujocoSimulator:
         p1=self.mapping['right_hip_roll']
         p2=self.mapping['left_hip_roll']
         return (p1 + p2) / 2.0
-    def get_trajectories(self,names,coords): #get the trajectory between specific points
+    def get_trajectories(self,names,coords,alpha=0.3): #get the trajectory between specific points
         traj=[]
         self.mapping=self.get_coordinates()
         for i in range(len(names)):
             v=coords[i]-self.mapping[names[i]]
             traj.append(v)
+        for i in range(len(traj)):
+            traj[i] = alpha * traj[i] + (1 - alpha) * traj[i]
         return traj
     def get_coords_of(self,names):
         self.mapping=self.get_coordinates()
@@ -137,12 +139,12 @@ class MujocoSimulator:
         self.data.act=state["act"]
     def align_human_to_robot(self,human_pose,robot_pose): #assumes these links are being used by the human and robot APIs
         def scale(human_pose,robot_pose):
-            robot_shoulder_to_foot=np.linalg.norm(((robot_pose[12]+robot_pose[16])/2)-((robot_pose[10]+robot_pose[5])/2))
+            robot_shoulder_to_foot=np.linalg.norm(((robot_pose[18]+robot_pose[13])/2)-((robot_pose[10]+robot_pose[5])/2))
             human_should_to_foot=np.linalg.norm(((human_pose[12]+human_pose[11])/2)-((human_pose[30]+human_pose[29])/2))
             return robot_shoulder_to_foot/human_should_to_foot
         def rotate(human_pose, robot_pose):
             H = human_pose[[12,11,29,30]]
-            R = robot_pose[[11,12,5,10]] 
+            R = robot_pose[[18,13,5,10]] 
             Hc = H - H.mean(axis=0)
             Rc = R - R.mean(axis=0)
             C = Hc.T @ Rc
@@ -155,14 +157,14 @@ class MujocoSimulator:
             return Rmat
         def offset(human_pose, robot_pose, s, R):
             human_center = (human_pose[12] + human_pose[11]) / 2
-            robot_center = (robot_pose[12] + robot_pose[16]) / 2
+            robot_center = (robot_pose[13] + robot_pose[18]) / 2
             return robot_center - s * (human_center @ R.T)
         if self.transform==False: #do once
-            self.s = 1.0967037662983774 #scale(human_pose, robot_pose)
-            self.R = np.array([[0.98604452,  0.06407436, -0.15365767],
- [-0.05412586,  0.99621056,  0.06808018],
- [ 0.15743759, -0.05881323,  0.98577604]]) #rotate(human_pose, robot_pose)
-            self.t = np.array([ 0.13703946, -0.11582972, -0.00019447])#offset(human_pose, robot_pose, self.s, self.R)
+            self.s = 1.0949403950035577 #scale(human_pose, robot_pose)
+            self.R = np.array([[ 0.98501622,  0.01535015, -0.17177726],
+                [-0.01011781,  0.999459 ,   0.03129426],
+                [ 0.1721647 , -0.02908735,  0.98463864]]) #rotate(human_pose, robot_pose)
+            self.t = np.array([ 0.16904198,-0.05293768,-0.02340868])#offset(human_pose, robot_pose, self.s, self.R)
             self.transform=True
         return self.s * (human_pose @ self.R.T) + self.t
 
