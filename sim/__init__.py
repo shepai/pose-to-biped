@@ -2,6 +2,7 @@ import mujoco
 import mujoco.viewer
 import numpy as np
 
+
 class MujocoSimulator:
     def __init__(self, xml_path: str,gravity=True):
         self.model = mujoco.MjModel.from_xml_path(xml_path)
@@ -21,6 +22,7 @@ class MujocoSimulator:
             pass
         for i in range(self.model.njnt):
             self.names=self.model.joint(i).name
+        self.transform=False
     def reset(self):
         mujoco.mj_resetData(self.model, self.data)
         if not self.gravity:
@@ -74,7 +76,7 @@ class MujocoSimulator:
         traj=[]
         self.mapping=self.get_coordinates()
         for i in range(len(names)):
-            v=self.mapping[names[i]]-coords[i]
+            v=coords[i]-self.mapping[names[i]]
             traj.append(v)
         return traj
     def get_coords_of(self,names):
@@ -133,6 +135,37 @@ class MujocoSimulator:
         self.data.qpos=state["qpos"]
         self.data.qvel=state["qvel"]
         self.data.act=state["act"]
+    def align_human_to_robot(self,human_pose,robot_pose): #assumes these links are being used by the human and robot APIs
+        def scale(human_pose,robot_pose):
+            robot_shoulder_to_foot=np.linalg.norm(((robot_pose[12]+robot_pose[16])/2)-((robot_pose[10]+robot_pose[5])/2))
+            human_should_to_foot=np.linalg.norm(((human_pose[12]+human_pose[11])/2)-((human_pose[30]+human_pose[29])/2))
+            return robot_shoulder_to_foot/human_should_to_foot
+        def rotate(human_pose, robot_pose):
+            H = human_pose[[12,11,29,30]]
+            R = robot_pose[[11,12,5,10]] 
+            Hc = H - H.mean(axis=0)
+            Rc = R - R.mean(axis=0)
+            C = Hc.T @ Rc
+            U, S, Vt = np.linalg.svd(C)
+            Rmat = Vt.T @ U.T
+            # fix reflection
+            if np.linalg.det(Rmat) < 0:
+                Vt[2, :] *= -1
+                Rmat = Vt.T @ U.T
+            return Rmat
+        def offset(human_pose, robot_pose, s, R):
+            human_center = (human_pose[12] + human_pose[11]) / 2
+            robot_center = (robot_pose[12] + robot_pose[16]) / 2
+            return robot_center - s * (human_center @ R.T)
+        if self.transform==False: #do once
+            self.s = 1.0967037662983774 #scale(human_pose, robot_pose)
+            self.R = np.array([[0.98604452,  0.06407436, -0.15365767],
+ [-0.05412586,  0.99621056,  0.06808018],
+ [ 0.15743759, -0.05881323,  0.98577604]]) #rotate(human_pose, robot_pose)
+            self.t = np.array([ 0.13703946, -0.11582972, -0.00019447])#offset(human_pose, robot_pose, self.s, self.R)
+            self.transform=True
+        return self.s * (human_pose @ self.R.T) + self.t
+
 
 
 # Example usage
