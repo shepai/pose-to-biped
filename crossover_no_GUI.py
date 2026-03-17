@@ -43,18 +43,18 @@ if __name__ == "__main__":
                                           points=np.array(list(sim.get_coordinates().values())))#sim.get_coords_of(["right_elbow", "left_elbow", "right_ankle","left_ankle"]))
         #get the hand and ankle links
         trajectories=sim.get_trajectories(["right_wrist", "left_wrist", "right_ankle","left_ankle"],
-                                          [landmarks[14],landmarks[13],landmarks[28],landmarks[27]])
+                                          [landmarks[16],landmarks[15],landmarks[28],landmarks[27]])
         #trajectories=[landmarks[14],landmarks[13],landmarks[28],landmarks[27]]
         movements = ki_mod.move_to(
                                     ["right_hand_link", "left_hand_link", "right_ankle_link","left_ankle_link"],
                                     targets=np.array(trajectories),
-                                    max_iter=100
+                                    max_iter=200
                                 )
         #step through sim
         for dic in movements:
             sim.map_move(dic)
             # Update MuJoCo kinematics
-            sim.set_step(5)     
+            sim.set_step(10)     
         renderer.update_scene(sim.data)
         pixels = renderer.render()
         pixels = cv2.cvtColor(pixels, cv2.COLOR_RGB2BGR)
