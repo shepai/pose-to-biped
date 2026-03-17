@@ -72,7 +72,7 @@ class MujocoSimulator:
         p1=self.mapping['right_hip_roll']
         p2=self.mapping['left_hip_roll']
         return (p1 + p2) / 2.0
-    def get_trajectories(self,names,coords,alpha=0.3): #get the trajectory between specific points
+    def get_trajectories(self,names,coords,alpha=0.4): #get the trajectory between specific points
         traj=[]
         self.mapping=self.get_coordinates()
         for i in range(len(names)):
