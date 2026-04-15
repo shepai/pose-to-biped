@@ -31,7 +31,7 @@ The simulator uses the unitree h1 robot and provides the tool for controlling it
 
 #### Kinematics and point alignment 
 
-![Alt text](https://github.com/shepai/pose-to-biped/tree/main/assets/output_record.gif)
+![Robot demo](https://raw.githubusercontent.com/shepai/pose-to-biped/main/assets/output_record.gif)
 
 #### RL transfer 
 

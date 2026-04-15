@@ -23,13 +23,26 @@ if __name__ == "__main__":
             ret, frame = cap.read()
             if not ret:
                 break
-            landmarks = extractor.process(frame)
+            
             plt.cla()
-            ax = extractor.plot_world_landmarks(landmarks, ax)
+            landmarks = extractor.process(frame)
+            landmarks,_=extractor.to_local_space(landmarks)
+            hips=sim.gethips()
+            landmarks=landmarks[:,:3] 
+            landmarks=(landmarks+hips) 
+            landmarks=sim.align_human_to_robot(landmarks,np.array(list(sim.get_coordinates().values())))
+            ax.cla()
+            ax=extractor.plot_world_landmarks(landmarks,ax,
+                                            points=np.array(list(sim.get_coordinates().values())))#sim.get_coords_of(["right_elbow", "left_elbow", "right_ankle","left_ankle"]))
             #get the hand and ankle links
-            movements=ki_mod.move_to(["right_hand_link", "left_hand_link", "right_ankle_link","left_ankle_link"],
-            targets=np.array([landmarks[16],landmarks[15],landmarks[28],landmarks[27]]))
-            #step through sim
+            trajectories=sim.get_trajectories(["right_wrist", "left_wrist", "right_ankle","left_ankle"],
+                                            [landmarks[16],landmarks[15],landmarks[28],landmarks[27]])
+            #trajectories=[landmarks[14],landmarks[13],landmarks[28],landmarks[27]]
+            movements = ki_mod.move_to(
+                                        ["right_hand_link", "left_hand_link", "right_ankle_link","left_ankle_link"],
+                                        targets=np.array(trajectories),
+                                        max_iter=200
+                                    )
             for dic in movements:
                 sim.map_move(dic)
                 # Update MuJoCo kinematics
