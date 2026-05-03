@@ -3,7 +3,8 @@ from __init__ import PoseExtractor, PARENTS
 import matplotlib.pyplot as plt 
 extractor = PoseExtractor(missing_value=-1.0)
 
-cap = cv2.VideoCapture(0)
+#cap = cv2.VideoCapture(0)
+cap = cv2.VideoCapture("C:/Users/dexte/Documents/GitHub/pose-to-biped/assets/walking.mp4")
 fig = plt.figure()
 ax = fig.add_subplot(111, projection="3d")
 c=0
@@ -18,6 +19,7 @@ while True:
         angles=extractor.compute_joint_angle_changes(PARENTS)
         print(angles)
     plt.cla()
+    print("Rotation:",extractor.get_rotation_from_origin())
     ax = extractor.plot_world_landmarks(landmarks, ax)
     plt.pause(0.05)
     cv2.imshow("Webcam", frame)
