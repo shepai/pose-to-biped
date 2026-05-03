@@ -167,7 +167,64 @@ class MujocoSimulator:
             self.t = np.array([ 0.16904198,-0.05293768,-0.02340868])#offset(human_pose, robot_pose, self.s, self.R)
             self.transform=True
         return self.s * (human_pose @ self.R.T) + self.t
-
+        
+    def set_orientation(self, angle):
+        # 1. Convert degrees to radians
+        angles_rad = np.deg2rad(angle) # angles = [roll, pitch, yaw]
+        self.data.eq_active[:] = 0
+        # 2. Reset (if you want to rotate from XML default)
+        # If rotating from LIVE pose, remove this and grab qpos[3:7]
+        mujoco.mj_resetData(self.model, self.data) 
+        
+        target_quat = np.zeros(4)
+        mujoco.mju_euler2Quat(target_quat, angles_rad, 'xyz')
+        
+        # 4. Apply to the robot base
+        self.data.qpos[3:7] = target_quat
+        
+        # 5. Stop physics glitches
+        self.data.qvel[:] = 0 
+        mujoco.mj_forward(self.model, self.data)
+        if self.model.nmocap > 0:
+            self.data.mocap_quat[0] = target_quat
+            # Also update position if you moved it
+            self.data.mocap_pos[0] = self.data.qpos[0:3] 
+        self.align_to_floor()
+        self.data.eq_active[:] = 1
+    def align_to_floor(self, offset=0.005):
+        mujoco.mj_forward(self.model, self.data)
+        min_z = float('inf')
+        for i in range(self.model.ngeom):
+            if self.model.geom_bodyid[i] == 0: 
+                continue
+            # Get the center Z positio
+            center_z = self.data.geom_xpos[i][2]
+            # Calculate the bottom of the geom based on its shape
+            # geom_size[i][0] is the radius for spheres/capsules/cylinders
+            # or the half-width/height for boxes
+            gtype = self.model.geom_type[i]
+            
+            if gtype == mujoco.mjtGeom.mjGEOM_SPHERE:
+                bottom_z = center_z - self.model.geom_size[i][0]
+            elif gtype in [mujoco.mjtGeom.mjGEOM_CAPSULE, mujoco.mjtGeom.mjGEOM_CYLINDER]:
+                # For vertical capsules/cylinders
+                bottom_z = center_z - self.model.geom_size[i][1] 
+            elif gtype == mujoco.mjtGeom.mjGEOM_BOX:
+                bottom_z = center_z - self.model.geom_size[i][2]
+            else:
+                bottom_z = center_z # Fallback
+                
+            if bottom_z < min_z:
+                min_z = bottom_z
+        # (Move down by min_z, then add back the tiny hover offset)
+        diff = min_z - offset
+        self.data.qpos[2] -= diff
+        # If using a mocap body, move it down too!
+        if self.model.nmocap > 0:
+            self.data.mocap_pos[0][2] -= diff
+        mujoco.mj_forward(self.model, self.data)
+    def set_pose(self,angles):
+        pass
 
 
 # Example usage
@@ -176,11 +233,14 @@ if __name__ == "__main__":
         "C:/Users/dexte/Documents/GitHub/pose-to-biped/Robots/scene.xml"
     )
     j=0
+    
     with mujoco.viewer.launch_passive(sim.model, sim.data) as viewer:
+            viewer.cam.distance = 5.0
+            sim.set_orientation([00,00,00])
             while viewer.is_running():
                 j+=1
-                if j<400:
-                    sim.set_position(sim.initial+(j/10000))
+                #if j<400:
+                    #sim.set_position(sim.initial+(j/10000))
                 sim.set_step()
                 viewer.sync()
                 #print(sim.get_local_coordinates())
