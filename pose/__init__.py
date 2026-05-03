@@ -221,6 +221,64 @@ class PoseExtractor:
             angle_changes[joint] = angle
 
         return angle_changes
+    def get_rotation_from_origin(self, landmarks=None, missing_value=-1.0): #essentially calculates a vector of x y and z with hips and shoulder
+        #wil need to do via local rather than 
+        if landmarks is None:
+            if self.landmarks_curr is None:
+                return None
+            landmarks = self.landmarks_curr
+
+        if len(landmarks) < 25:
+            return None
+
+        # Key joints
+        L_HIP = landmarks[23, :3]
+        R_HIP = landmarks[24, :3]
+        L_SHOULDER = landmarks[11, :3]
+        R_SHOULDER = landmarks[12, :3]
+
+        # Check validity
+        if np.any(L_HIP == missing_value) or np.any(R_HIP == missing_value):
+            return None
+        if np.any(L_SHOULDER == missing_value) or np.any(R_SHOULDER == missing_value):
+            return None
+
+        # --- Origin ---
+        root = (L_HIP + R_HIP) / 2.0
+
+        # --- Axes ---
+        x_axis = R_HIP - L_HIP
+        x_axis = x_axis / (np.linalg.norm(x_axis) + 1e-8)
+
+        shoulder_mid = (L_SHOULDER + R_SHOULDER) / 2.0
+        y_axis = shoulder_mid - root
+        y_axis = y_axis / (np.linalg.norm(y_axis) + 1e-8)
+
+        # Z axis (forward/back)
+        z_axis = np.cross(x_axis, y_axis)
+        z_axis = z_axis / (np.linalg.norm(z_axis) + 1e-8)
+
+        # Re-orthogonalise Y
+        y_axis = np.cross(z_axis, x_axis)
+
+        # Final rotation matrix (columns = body axes)
+        R = np.stack([x_axis, y_axis, z_axis], axis=1)
+
+        sy = np.sqrt(R[0,0]**2 + R[1,0]**2)
+
+        singular = sy < 1e-6
+
+        if not singular:
+            roll  = np.arctan2(R[2,1], R[2,2])   # x-axis rotation
+            pitch = np.arctan2(-R[2,0], sy)      # y-axis rotation
+            yaw   = np.arctan2(R[1,0], R[0,0])   # z-axis rotation
+        else:
+            roll  = np.arctan2(-R[1,2], R[1,1])
+            pitch = np.arctan2(-R[2,0], sy)
+            yaw   = 0
+
+        return np.rad2deg(np.array([roll, pitch, yaw]))
+
 if __name__=="__main__":
     import cv2
     import matplotlib.pyplot as plt 
@@ -244,7 +302,7 @@ if __name__=="__main__":
         ax = extractor.plot_world_landmarks(landmarks, ax)
         plt.pause(0.05)
         cv2.imshow("Webcam", frame)
-
+        print("Rotation:",extractor.get_rotation_from_origin(landmarks=landmarks))
         if cv2.waitKey(1) & 0xFF == 27:
             break
 
