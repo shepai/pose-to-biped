@@ -173,7 +173,7 @@ class MujocoSimulator:
 # Example usage
 if __name__ == "__main__":
     sim = MujocoSimulator(
-        "C:/Users/dexte/Documents/mujoco_menagerie-main/mujoco_menagerie-main/unitree_h1/scene.xml"
+        "C:/Users/dexte/Documents/GitHub/pose-to-biped/Robots/scene.xml"
     )
     j=0
     with mujoco.viewer.launch_passive(sim.model, sim.data) as viewer:
