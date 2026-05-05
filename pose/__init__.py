@@ -1,6 +1,7 @@
 import cv2
 import mediapipe as mp
 import numpy as np
+from scipy.spatial.transform import Rotation as R
 
 PARENTS = {
     # Upper body
@@ -221,8 +222,8 @@ class PoseExtractor:
             angle_changes[joint] = angle
 
         return angle_changes
-    def get_rotation_from_origin(self, landmarks=None, missing_value=-1.0): #essentially calculates a vector of x y and z with hips and shoulder
-        #wil need to do via local rather than 
+    def get_rotation_from_origin(self, landmarks=None, missing_value=-1.0):
+
         if landmarks is None:
             if self.landmarks_curr is None:
                 return None
@@ -231,54 +232,96 @@ class PoseExtractor:
         if len(landmarks) < 25:
             return None
 
-        # Key joints
+        # -------------------------
+        # Key landmarks (MediaPipe)
+        # -------------------------
         L_HIP = landmarks[23, :3]
         R_HIP = landmarks[24, :3]
         L_SHOULDER = landmarks[11, :3]
         R_SHOULDER = landmarks[12, :3]
 
-        # Check validity
+        # -------------------------
+        # validity check
+        # -------------------------
         if np.any(L_HIP == missing_value) or np.any(R_HIP == missing_value):
             return None
         if np.any(L_SHOULDER == missing_value) or np.any(R_SHOULDER == missing_value):
             return None
 
-        # --- Origin ---
-        root = (L_HIP + R_HIP) / 2.0
+        # -------------------------
+        # Root (pelvis center)
+        # -------------------------
+        root = 0.5 * (L_HIP + R_HIP)
 
-        # --- Axes ---
+        # -------------------------
+        # X axis (hip left-right)
+        # -------------------------
         x_axis = R_HIP - L_HIP
-        x_axis = x_axis / (np.linalg.norm(x_axis) + 1e-8)
+        x_norm = np.linalg.norm(x_axis)
+        if x_norm < 1e-8:
+            return None
+        x_axis /= x_norm
 
-        shoulder_mid = (L_SHOULDER + R_SHOULDER) / 2.0
-        y_axis = shoulder_mid - root
-        y_axis = y_axis / (np.linalg.norm(y_axis) + 1e-8)
+        # -------------------------
+        # Forward direction (torso direction)
+        # -------------------------
+        shoulder_mid = 0.5 * (L_SHOULDER + R_SHOULDER)
+        forward = shoulder_mid - root
 
-        # Z axis (forward/back)
-        z_axis = np.cross(x_axis, y_axis)
-        z_axis = z_axis / (np.linalg.norm(z_axis) + 1e-8)
+        # remove hip-aligned component
+        forward = forward - np.dot(forward, x_axis) * x_axis
+        f_norm = np.linalg.norm(forward)
+        if f_norm < 1e-8:
+            return None
+        forward /= f_norm
 
-        # Re-orthogonalise Y
-        y_axis = np.cross(z_axis, x_axis)
+        # -------------------------
+        # Up axis (derived, NOT assumed)
+        # -------------------------
+        up = np.cross(x_axis, forward)
+        u_norm = np.linalg.norm(up)
+        if u_norm < 1e-8:
+            return None
+        up /= u_norm
 
-        # Final rotation matrix (columns = body axes)
-        R = np.stack([x_axis, y_axis, z_axis], axis=1)
+        # re-orthogonalise forward (important)
+        forward = np.cross(up, x_axis)
 
-        sy = np.sqrt(R[0,0]**2 + R[1,0]**2)
+        # -------------------------
+        # Rotation matrix (right-handed)
+        # columns = body axes
+        # -------------------------
+        R_mat = np.stack([x_axis, up, forward], axis=1)
 
-        singular = sy < 1e-6
+        # -------------------------
+        # FIX: enforce valid SO(3)
+        # -------------------------
+        det = np.linalg.det(R_mat)
+        if det < 0:
+            R_mat[:, 2] *= -1  # fix left-handed flip
 
-        if not singular:
-            roll  = np.arctan2(R[2,1], R[2,2])   # x-axis rotation
-            pitch = np.arctan2(-R[2,0], sy)      # y-axis rotation
-            yaw   = np.arctan2(R[1,0], R[0,0])   # z-axis rotation
-        else:
-            roll  = np.arctan2(-R[1,2], R[1,1])
-            pitch = np.arctan2(-R[2,0], sy)
-            yaw   = 0
+        # -------------------------
+        # Convert to quaternion safely
+        # -------------------------
+        quat = R.from_matrix(R_mat).as_quat()  # [x, y, z, w]
 
-        return np.rad2deg(np.array([roll, pitch, yaw]))
+        # -------------------------
+        # Temporal smoothing in quaternion space
+        # -------------------------
+        if not hasattr(self, "prev_quat"):
+            self.prev_quat = quat
 
+        # ensure shortest-path interpolation (prevents flips)
+        if np.dot(self.prev_quat, quat) < 0:
+            quat = -quat
+
+        self.prev_quat = 0.9 * self.prev_quat + 0.1 * quat
+        self.prev_quat /= np.linalg.norm(self.prev_quat)
+
+        # -------------------------
+        # Output rotation vector (for control)
+        # -------------------------
+        return R.from_quat(self.prev_quat).as_rotvec()
 if __name__=="__main__":
     import cv2
     import matplotlib.pyplot as plt 

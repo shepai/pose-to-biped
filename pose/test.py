@@ -4,7 +4,7 @@ import matplotlib.pyplot as plt
 extractor = PoseExtractor(missing_value=-1.0)
 
 #cap = cv2.VideoCapture(0)
-cap = cv2.VideoCapture("C:/Users/dexte/Documents/GitHub/pose-to-biped/assets/walking.mp4")
+cap = cv2.VideoCapture("/home/dexter/.cache/kagglehub/datasets/nandwalritik/yoga-pose-videos-dataset/versions/2/Yoga_Vid_Collected/Abhay_Bhujangasana.mp4")
 fig = plt.figure()
 ax = fig.add_subplot(111, projection="3d")
 c=0

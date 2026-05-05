@@ -1,7 +1,9 @@
 import mujoco
 import mujoco.viewer
 import numpy as np
+import logging
 
+logging.getLogger().setLevel(logging.ERROR)
 
 class MujocoSimulator:
     def __init__(self, xml_path: str,gravity=True):
@@ -13,7 +15,7 @@ class MujocoSimulator:
         joint_start = self.model.nq - self.model.nu
         joint_end = self.model.nq
         self.initial=self.data.qpos[:]
-        self.initial = self.initial[joint_start:joint_end]
+        self.initial = self.initial[joint_start:joint_end].copy()
         self.mapping={}
         self.names=[]
         self.gravity=gravity
@@ -25,6 +27,9 @@ class MujocoSimulator:
         self.transform=False
     def reset(self):
         mujoco.mj_resetData(self.model, self.data)
+        joint_start = self.model.nq - self.model.nu
+        joint_end = self.model.nq
+        self.data.qpos[:]=self.initial[joint_start:joint_end].copy()
         if not self.gravity:
             self.model.opt.gravity[:] = [0, 0, 0]
     def set_position(self, target_qpos, kp=200.0, kd=50.0):
@@ -98,17 +103,6 @@ class MujocoSimulator:
         for key in range(len(coords)):
             coords[key]=coords[key]+centre
         return coords #return points and centre
-    def run(self):
-        """
-        Launch the passive viewer and run the simulation loop.
-        """
-        j=0
-        with mujoco.viewer.launch_passive(self.model, self.data) as viewer:
-            while viewer.is_running():
-                j+=1
-                self.set_position(self.initial+(j/10000))
-                mujoco.mj_step(self.model, self.data)
-                viewer.sync()
     def get_state(self):
         state = {
             "qpos": self.data.qpos.copy(),
@@ -118,21 +112,20 @@ class MujocoSimulator:
         return state
     def map_move(self, joint_dict):
         for name, value in joint_dict.items():
-            # Clean the name if your URDF names have "_joint" suffix but MuJoCo doesn't
             mj_name = name.replace("_joint", "")
-            
-            try:
-                # Get the correct ID for this specific joint name
-                joint_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, mj_name)
-                
-                if joint_id != -1:
-                    # Get the starting address of this joint's data in qpos
-                    qpos_adr = self.model.jnt_qposadr[joint_id]
-                    # Map the value (ensure it's the right size, e.g., 1 for hinge, 7 for freejoint)
-                    self.data.qpos[qpos_adr : qpos_adr + len(np.atleast_1d(value))] = value
-            except ValueError:
-                # This skips names that exist in Pinocchio but not in MuJoCo (like the frozen_part)
-                continue
+
+            joint_id = mujoco.mj_name2id(
+                self.model,
+                mujoco.mjtObj.mjOBJ_JOINT,
+                mj_name
+            )
+
+            if joint_id != -1:
+                qpos_adr = self.model.jnt_qposadr[joint_id]
+
+                self.data.qpos[qpos_adr:qpos_adr + len(np.atleast_1d(value))] = value
+        self.data.qvel[:] = 0
+        mujoco.mj_forward(self.model, self.data)
     def set_state(self,state):
         self.data.qpos=state["qpos"]
         self.data.qvel=state["qvel"]
@@ -169,13 +162,9 @@ class MujocoSimulator:
         return self.s * (human_pose @ self.R.T) + self.t
         
     def set_orientation(self, angle):
-        # 1. Convert degrees to radians
-        angles_rad = np.deg2rad(angle) # angles = [roll, pitch, yaw]
+        angles_rad = angle#np.deg2rad(angle) # angles = [roll, pitch, yaw]
         self.data.eq_active[:] = 0
-        # 2. Reset (if you want to rotate from XML default)
-        # If rotating from LIVE pose, remove this and grab qpos[3:7]
         mujoco.mj_resetData(self.model, self.data) 
-        
         target_quat = np.zeros(4)
         mujoco.mju_euler2Quat(target_quat, angles_rad, 'xyz')
         
@@ -191,6 +180,10 @@ class MujocoSimulator:
             self.data.mocap_pos[0] = self.data.qpos[0:3] 
         self.align_to_floor()
         self.data.eq_active[:] = 1
+        joint_start = self.model.nq - self.model.nu
+        joint_end = self.model.nq
+        self.initial=self.data.qpos[:]
+        self.initial = self.initial[joint_start:joint_end].copy()
     def align_to_floor(self, offset=0.005):
         mujoco.mj_forward(self.model, self.data)
         min_z = float('inf')
@@ -223,6 +216,7 @@ class MujocoSimulator:
         if self.model.nmocap > 0:
             self.data.mocap_pos[0][2] -= diff
         mujoco.mj_forward(self.model, self.data)
+        
     def set_pose(self,angles):
         pass
 
