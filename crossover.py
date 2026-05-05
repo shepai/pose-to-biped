@@ -19,7 +19,7 @@ def get_traj(extractor,sim,frame):
         #landmarks=(landmarks+hips) 
         landmarks=sim.align_human_to_robot(landmarks)
         ax.cla()
-        ax=extractor.plot_world_landmarks(landmarks,ax,points=np.array(list(sim.get_coordinates().values())))#sim.get_coords_of(["right_elbow", "left_elbow", "right_ankle","left_ankle"]))
+        ax=extractor.plot_world_landmarks(landmarks.copy(),ax,points=np.array(list(sim.get_coordinates().values())))#sim.get_coords_of(["right_elbow", "left_elbow", "right_ankle","left_ankle"]))
         #get the hand and ankle links
         trajectories=sim.get_trajectories(["right_wrist", "left_wrist", "right_ankle", "left_ankle", "right_elbow", "left_elbow", "right_knee", "left_knee"],
                                         [landmarks[16],landmarks[15],landmarks[28],landmarks[27],landmarks[14],landmarks[13],landmarks[26],landmarks[25]])
@@ -28,7 +28,7 @@ def get_traj(extractor,sim,frame):
 if __name__ == "__main__":
     extractor = PoseExtractor(missing_value=-1.0)
     #cap = cv2.VideoCapture(0)
-    cap = cv2.VideoCapture("/home/dexter/Documents/GitHub/pose-to-biped/assets/walking.mp4")
+    cap = cv2.VideoCapture("/home/dexter/.cache/kagglehub/datasets/nandwalritik/yoga-pose-videos-dataset/versions/2/Yoga_Vid_Collected/Abhay_Bhujangasana.mp4")
     #/home/dexter/Documents/GitHub/pose-to-biped/assets/walking.mp4
     #"/home/dexter/.cache/kagglehub/datasets/nandwalritik/yoga-pose-videos-dataset/versions/2/Yoga_Vid_Collected/Abhay_Bhujangasana.mp4"
     fig = plt.figure()
@@ -36,25 +36,20 @@ if __name__ == "__main__":
     sim = MujocoSimulator(
             "/home/dexter/Documents/GitHub/pose-to-biped/Robots/scene.xml"
         )
-    ki_mod=kinematics_tranfser("/home/dexter/Documents/GitHub/pose-to-biped/Robots/h1_with_hand.urdf")
-    for i in range(20):
-        ret, frame = cap.read()
-        if not ret:
-            print("No first frame")
-        trajectories,landmarks=get_traj(extractor,sim,frame)
-    landmarks = extractor.process(frame)
-    landmarks,_=extractor.to_local_space(landmarks)
-    landmarks=landmarks[:,:3] 
-    landmarks=sim.align_human_to_robot(landmarks)
-    ar=extractor.get_rotation_from_origin(landmarks)
-    print("Rotation:",ar)
-    sim.rotate_robot_to_human(landmarks)
-    ki_mod.equalise_sims(sim)
-    movements = ki_mod.move_to(["right_hand_link", "left_hand_link", "right_ankle_link","left_ankle_link","right_elbow_link","left_elbow_link","right_knee_link","left_knee_link"],
-                                        targets=np.array(trajectories),
-                                        max_iter=20
-                                    )
+    
     with mujoco.viewer.launch_passive(sim.model, sim.data) as viewer: 
+        ki_mod=kinematics_tranfser("/home/dexter/Documents/GitHub/pose-to-biped/Robots/h1_with_hand.urdf")
+        for i in range(20):
+            ret, frame = cap.read()
+            if not ret:
+                print("No first frame")
+            trajectories,landmarks=get_traj(extractor,sim,frame)
+        sim.rotate_robot_to_human(landmarks)
+        ki_mod.equalise_sims(sim)
+        movements = ki_mod.move_to(["right_hand_link", "left_hand_link", "right_ankle_link","left_ankle_link","right_elbow_link","left_elbow_link","right_knee_link","left_knee_link"],
+                                            targets=np.array(trajectories),
+                                            max_iter=20
+                                        )
         viewer.cam.distance = 5.0       
         while viewer.is_running():
             ret, frame = cap.read()

@@ -1,8 +1,9 @@
 import mujoco
 import mujoco.viewer
 import numpy as np
+np.set_printoptions(suppress=True)
 import logging
-
+from scipy.spatial.transform import Rotation as Rot
 logging.getLogger().setLevel(logging.ERROR)
 
 class MujocoSimulator:
@@ -19,6 +20,10 @@ class MujocoSimulator:
         self.mapping={}
         self.names=[]
         self.gravity=gravity
+        self.transform = False
+        self.s = None
+        self.R = None
+        self.t = None
         if not gravity:
             #self.model.opt.gravity[:] = [0, 0, 0]
             pass
@@ -130,37 +135,57 @@ class MujocoSimulator:
         self.data.qpos=state["qpos"]
         self.data.qvel=state["qvel"]
         self.data.act=state["act"]
-    def align_human_to_robot(self,human_pose,robot_pose): #assumes these links are being used by the human and robot APIs
-        def scale(human_pose,robot_pose):
-            robot_shoulder_to_foot=np.linalg.norm(((robot_pose[18]+robot_pose[13])/2)-((robot_pose[10]+robot_pose[5])/2))
-            human_should_to_foot=np.linalg.norm(((human_pose[12]+human_pose[11])/2)-((human_pose[30]+human_pose[29])/2))
-            return robot_shoulder_to_foot/human_should_to_foot
-        def rotate(human_pose, robot_pose):
-            H = human_pose[[12,11,29,30]]
-            R = robot_pose[[18,13,5,10]] 
-            Hc = H - H.mean(axis=0)
-            Rc = R - R.mean(axis=0)
-            C = Hc.T @ Rc
-            U, S, Vt = np.linalg.svd(C)
-            Rmat = Vt.T @ U.T
-            # fix reflection
-            if np.linalg.det(Rmat) < 0:
-                Vt[2, :] *= -1
-                Rmat = Vt.T @ U.T
-            return Rmat
-        def offset(human_pose, robot_pose, s, R):
-            human_center = (human_pose[12] + human_pose[11]) / 2
-            robot_center = (robot_pose[13] + robot_pose[18]) / 2
-            return robot_center - s * (human_center @ R.T)
-        if self.transform==False: #do once
-            self.s = 1.0949403950035577 #scale(human_pose, robot_pose)
-            self.R = np.array([[ 0.98501622,  0.01535015, -0.17177726],
-                [-0.01011781,  0.999459 ,   0.03129426],
-                [ 0.1721647 , -0.02908735,  0.98463864]]) #rotate(human_pose, robot_pose)
-            self.t = np.array([ 0.16904198,-0.05293768,-0.02340868])#offset(human_pose, robot_pose, self.s, self.R)
-            self.transform=True
-        return self.s * (human_pose @ self.R.T) + self.t
-        
+    def align_human_to_robot(self, human_pose):
+        robot_coords = np.array(list(self.get_coordinates().values()))
+        H = human_pose[[11, 12, 23, 24, 28, 27]].astype(np.float64)
+        R = robot_coords[[13, 18, 6, 1, 5, 10]].astype(np.float64)
+        # center both
+        H_mean = H.mean(axis=0)
+        R_mean = R.mean(axis=0)
+        Hc = H - H_mean
+        Rc = R - R_mean
+        # SCALE ONLY (no rotation)
+        scale = np.sqrt(np.sum(Rc ** 2) / np.sum(Hc ** 2))
+        # apply scaling only
+        H_scaled = human_pose.astype(np.float64) * scale
+        # translate to robot centroid
+        aligned = H_scaled + (R_mean - H_mean * scale)
+        return aligned
+    def rotate_robot_to_human(self, human_pose):
+        robot_coords = np.array(list(self.get_coordinates().values()), dtype=np.float64)
+
+        # Corresponding joint subsets
+        H = human_pose[[11, 12, 23, 24, 28, 27]].astype(np.float64)
+        R = robot_coords[[13, 18, 6, 1, 5, 10]].astype(np.float64)
+
+        # --- 1. Center both point sets ---
+        H_mean = H.mean(axis=0)
+        R_mean = R.mean(axis=0)
+
+        Hc = H - H_mean
+        Rc = R - R_mean
+
+        # --- 2. Kabsch alignment (optimal rotation) ---
+        Hcov = Hc.T @ Rc
+        U, S, Vt = np.linalg.svd(Hcov)
+
+        R_opt = Vt.T @ U.T
+
+        # Fix reflection issue (ensure proper rotation)
+        if np.linalg.det(R_opt) < 0:
+            Vt[-1, :] *= -1
+            R_opt = Vt.T @ U.T
+
+        # --- 3. Convert rotation matrix to Euler angles ---
+        rot_obj = Rot.from_matrix(R_opt)
+        euler_xyz = rot_obj.as_euler('xyz', degrees=False)
+
+        # Debug (optional)
+        print("Euler (deg):", np.degrees(euler_xyz))
+
+        # --- 4. Apply to robot ---
+        self.set_orientation(euler_xyz)
+
     def set_orientation(self, angle):
         angles_rad = angle#np.deg2rad(angle) # angles = [roll, pitch, yaw]
         self.data.eq_active[:] = 0
@@ -184,37 +209,36 @@ class MujocoSimulator:
         joint_end = self.model.nq
         self.initial=self.data.qpos[:]
         self.initial = self.initial[joint_start:joint_end].copy()
-    def align_to_floor(self, offset=0.005):
+    def get_robot_lowest_point(self):
         mujoco.mj_forward(self.model, self.data)
         min_z = float('inf')
         for i in range(self.model.ngeom):
-            if self.model.geom_bodyid[i] == 0: 
+            # skip world geoms if needed
+            body_id = self.model.geom_bodyid[i]
+            if body_id == 0:
                 continue
-            # Get the center Z positio
-            center_z = self.data.geom_xpos[i][2]
-            # Calculate the bottom of the geom based on its shape
-            # geom_size[i][0] is the radius for spheres/capsules/cylinders
-            # or the half-width/height for boxes
+            pos = self.data.geom_xpos[i]
+            z = pos[2]
             gtype = self.model.geom_type[i]
-            
+            size = self.model.geom_size[i]
+            # approximate vertical extent in LOCAL frame
             if gtype == mujoco.mjtGeom.mjGEOM_SPHERE:
-                bottom_z = center_z - self.model.geom_size[i][0]
-            elif gtype in [mujoco.mjtGeom.mjGEOM_CAPSULE, mujoco.mjtGeom.mjGEOM_CYLINDER]:
-                # For vertical capsules/cylinders
-                bottom_z = center_z - self.model.geom_size[i][1] 
+                bottom = z - size[0]
+            elif gtype == mujoco.mjtGeom.mjGEOM_CAPSULE:
+                bottom = z - size[1]
+            elif gtype == mujoco.mjtGeom.mjGEOM_CYLINDER:
+                bottom = z - size[1]
             elif gtype == mujoco.mjtGeom.mjGEOM_BOX:
-                bottom_z = center_z - self.model.geom_size[i][2]
+                bottom = z - size[2]
             else:
-                bottom_z = center_z # Fallback
-                
-            if bottom_z < min_z:
-                min_z = bottom_z
-        # (Move down by min_z, then add back the tiny hover offset)
-        diff = min_z - offset
-        self.data.qpos[2] -= diff
-        # If using a mocap body, move it down too!
-        if self.model.nmocap > 0:
-            self.data.mocap_pos[0][2] -= diff
+                bottom = z
+            min_z = min(min_z, bottom)
+        return min_z
+    def align_to_floor(self, offset=0.005):
+        mujoco.mj_forward(self.model, self.data)
+        min_z = self.get_robot_lowest_point()
+        shift = -min_z + offset
+        self.data.qpos[2] += shift
         mujoco.mj_forward(self.model, self.data)
         
     def set_pose(self,angles):
