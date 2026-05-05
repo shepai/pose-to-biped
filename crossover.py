@@ -10,7 +10,8 @@ import mujoco
 import cv2
 if __name__ == "__main__":
     extractor = PoseExtractor(missing_value=-1.0)
-    cap = cv2.VideoCapture(0)
+    #cap = cv2.VideoCapture(0)
+    cap = cv2.VideoCapture("/home/dexter/Documents/GitHub/pose-to-biped/assets/walking.mp4")
     fig = plt.figure()
     ax = fig.add_subplot(111, projection="3d")
     sim = MujocoSimulator(
@@ -33,11 +34,11 @@ if __name__ == "__main__":
                 #ax.cla()
                 #ax=extractor.plot_world_landmarks(landmarks,ax,points=np.array(list(sim.get_coordinates().values())))#sim.get_coords_of(["right_elbow", "left_elbow", "right_ankle","left_ankle"]))
                 #get the hand and ankle links
-                trajectories=sim.get_trajectories(["right_wrist", "left_wrist", "right_ankle","left_ankle"],
-                                                [landmarks[16],landmarks[15],landmarks[28],landmarks[27]])
+                trajectories=sim.get_trajectories(["right_wrist", "left_wrist", "right_ankle", "left_ankle", "right_elbow", "left_elbow", "right_knee", "left_knee"],
+                                                [landmarks[16],landmarks[15],landmarks[28],landmarks[27],landmarks[14],landmarks[13],landmarks[26],landmarks[25]])
                 #trajectories=[landmarks[14],landmarks[13],landmarks[28],landmarks[27]]
                 movements = ki_mod.move_to(
-                                            ["right_hand_link", "left_hand_link", "right_ankle_link","left_ankle_link"],
+                                            ["right_hand_link", "left_hand_link", "right_ankle_link","left_ankle_link","right_elbow_link","left_elbow_link","right_knee_link","left_knee_link"],
                                             targets=np.array(trajectories),
                                             max_iter=20
                                         )
@@ -46,14 +47,15 @@ if __name__ == "__main__":
                     # Update MuJoCo kinematics
                     sim.set_step(1)     
             viewer.sync()
-            #frame = cv2.resize(frame, (640, 480))  # match webcam frame
-            #fig.canvas.draw()
-            #img = np.frombuffer(fig.canvas.buffer_rgba(), dtype=np.uint8)
-            #img = img.reshape(fig.canvas.get_width_height()[::-1] + (4,))
+            ki_mod.equalise_sims(sim)
+            """frame = cv2.resize(frame, (640, 480))  # match webcam frame
+            fig.canvas.draw()
+            img = np.frombuffer(fig.canvas.buffer_rgba(), dtype=np.uint8)
+            img = img.reshape(fig.canvas.get_width_height()[::-1] + (4,))
 
-            #img = img[..., :3]  # convert RGBA → RGB
-            #img = cv2.resize(img, (640, 480))
-            #frame = np.concatenate((frame), axis=1).astype(np.uint8)
+            img = img[..., :3]  # convert RGBA → RGB
+            img = cv2.resize(img, (640, 480))
+            frame = np.concatenate((frame,img), axis=1).astype(np.uint8)"""
             cv2.imshow("debug_frame", frame)
             if cv2.waitKey(1) & 0xFF == 27:
                 break

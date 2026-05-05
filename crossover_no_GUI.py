@@ -23,12 +23,13 @@ if __name__ == "__main__":
     j=0
     ki_mod=kinematics_tranfser("/home/dexter/Documents/GitHub/pose-to-biped/Robots/h1_with_hand.urdf")
     # Output video writer
-    output_path = "/home/dexter/Documents/GitHub/pose-to-biped/assets/output_record2.mp4"
+    output_path = "/home/dexter/Documents/GitHub/pose-to-biped/assets/output_record.mp4"
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
     out = cv2.VideoWriter(output_path, fourcc, 25, (640*3, 480))
     fig = plt.figure()
     ax = fig.add_subplot(111, projection='3d')
-    while j<100:
+    ret=True
+    while ret:
         ret, frame = cap.read()
         if not ret:
             break
@@ -42,19 +43,20 @@ if __name__ == "__main__":
         ax=extractor.plot_world_landmarks(landmarks,ax,
                                           points=np.array(list(sim.get_coordinates().values())))#sim.get_coords_of(["right_elbow", "left_elbow", "right_ankle","left_ankle"]))
         #get the hand and ankle links
-        trajectories=sim.get_trajectories(["right_wrist", "left_wrist", "right_ankle","left_ankle"],
-                                          [landmarks[16],landmarks[15],landmarks[28],landmarks[27]])
-        #trajectories=[landmarks[14],landmarks[13],landmarks[28],landmarks[27]]
+        trajectories=sim.get_trajectories(["right_wrist", "left_wrist", "right_ankle", "left_ankle", "right_elbow", "left_elbow", "right_knee", "left_knee"],
+                                                [landmarks[16],landmarks[15],landmarks[28],landmarks[27],landmarks[14],landmarks[13],landmarks[26],landmarks[25]])
+                #trajectories=[landmarks[14],landmarks[13],landmarks[28],landmarks[27]]
         movements = ki_mod.move_to(
-                                    ["right_hand_link", "left_hand_link", "right_ankle_link","left_ankle_link"],
+                                    ["right_hand_link", "left_hand_link", "right_ankle_link","left_ankle_link","right_elbow_link","left_elbow_link","right_knee_link","left_knee_link"],
                                     targets=np.array(trajectories),
-                                    max_iter=200
+                                    max_iter=20
                                 )
         #step through sim
         for dic in movements:
             sim.map_move(dic)
             # Update MuJoCo kinematics
-            sim.set_step(10)     
+            sim.set_step(1)     
+        ki_mod.equalise_sims(sim)
         renderer.update_scene(sim.data)
         pixels = renderer.render()
         pixels = cv2.cvtColor(pixels, cv2.COLOR_RGB2BGR)

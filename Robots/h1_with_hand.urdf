@@ -903,7 +903,7 @@
     </collision>
   </link>
   <joint
-    name="left_hand_joint"
+    name="left_wrist"
     type="revolute">
     <origin
       xyz="0.2605 0 -0.0185"
@@ -1910,7 +1910,7 @@
     </collision>
   </link>
   <joint
-    name="right_hand_joint"
+    name="right_wrist"
     type="revolute">
     <origin
       xyz="0.2605 0 -0.0185"

@@ -15,6 +15,31 @@ class kinematics_tranfser:
         self.configuration = pink.Configuration(self.model, self.data, self.q)
         self.com_task = ComTask(cost=200.0)
         self.com_task.set_target_from_configuration(self.configuration)
+        self.joint_map = {
+    "left_hip_yaw": "left_hip_yaw_joint",
+    "left_hip_roll": "left_hip_roll_joint",
+    "left_hip_pitch": "left_hip_pitch_joint",
+    "left_knee": "left_knee_joint",
+    "left_ankle": "left_ankle_joint",
+
+    "right_hip_yaw": "right_hip_yaw_joint",
+    "right_hip_roll": "right_hip_roll_joint",
+    "right_hip_pitch": "right_hip_pitch_joint",
+    "right_knee": "right_knee_joint",
+    "right_ankle": "right_ankle_joint",
+
+    "torso": "torso_joint",
+
+    "left_shoulder_pitch": "left_shoulder_pitch_joint",
+    "left_shoulder_roll": "left_shoulder_roll_joint",
+    "left_shoulder_yaw": "left_shoulder_yaw_joint",
+    "left_elbow": "left_elbow_joint",
+
+    "right_shoulder_pitch": "right_shoulder_pitch_joint",
+    "right_shoulder_roll": "right_shoulder_roll_joint",
+    "right_shoulder_yaw": "right_shoulder_yaw_joint",
+    "right_elbow": "right_elbow_joint",
+}
     def move_to(self,joint_names=["right_hand_link", "left_hand_link"],targets=np.array([[-0.1, 0.1, 0.5],[-0.1, 0.1, 0.5]]),max_iter=100): #calculate joint movements
         rate = RateLimiter(frequency=200.0, warn=False)
         dt = rate.period
@@ -67,36 +92,39 @@ class kinematics_tranfser:
                 dic[joint]=joint_q
             movements.append(dic)
         return movements
-    def equalise_sims(self, mujoco_sim): 
-        joints=mujoco_sim.get_coordinates()
-        mujoco_joint_names=list(joints.keys())
-        mujoco_qs=list(joints.values())
-        self.configuration.q = np.array(self.configuration.q, copy=True)
-        for joint_name in self.model.names:
-            if joint_name == "universe":
+    def equalise_sims(self, mujoco_sim):
+        mujoco_joints = mujoco_sim.get_coordinates()
+
+        # IMPORTANT: start from current Pinocchio state
+        q = np.array(self.configuration.q, copy=True)
+
+        for mujoco_name, pin_name in self.joint_map.items():
+
+            if mujoco_name not in mujoco_joints:
                 continue
-            # Fuzzy match
-            match = get_close_matches(joint_name, mujoco_joint_names, n=1, cutoff=0.5)
-            if not match:
+
+            if pin_name not in self.model.names:
                 continue
-            mujoco_joint_name = match[0]
-            mujoco_idx = mujoco_joint_names.index(mujoco_joint_name)
-            mujoco_q = mujoco_qs[mujoco_idx]
 
-            joint_id = self.model.getJointId(joint_name)
-            q_start = self.model.joints[joint_id].idx_q
-            q_size = self.model.joints[joint_id].nq
+            mujoco_q = np.atleast_1d(mujoco_joints[mujoco_name])
 
-            # Ensure mujoco_q is a NumPy array
-            mujoco_q = np.atleast_1d(mujoco_q)
+            joint_id = self.model.getJointId(pin_name)
+            joint = self.model.joints[joint_id]
 
-            # Assign slice directly
-            self.configuration.q[q_start : q_start + q_size] = mujoco_q[:q_size]
+            q_start = joint.idx_q
+            q_size = joint.nq
 
-        # Update Pinocchio internal data
-        pin.forwardKinematics(self.model, self.data, self.configuration.q)
+            # Safety check: dimension must match
+            if len(mujoco_q) != q_size:
+                continue
+
+            q[q_start:q_start + q_size] = mujoco_q
+
+        # update configuration
+        self.configuration.q = q
+
+        pin.forwardKinematics(self.model, self.data, q)
         self.configuration.update()
-
 if __name__=="__main__":
     import os
     os.environ["MUJOCO_GL"] = "egl"
