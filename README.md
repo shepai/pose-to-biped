@@ -9,14 +9,14 @@ pip install --upgrade mujoco
 pip install opencv-python
 pip install pin-pink
 pip install osqp
-pip install mediapipe
+pip install "mediapipe==0.10.14"
 pip install matplotlib
 ```
 Be aware that pin-pink works better on Linux, we have not been able to get this running on Windows. This library is needed kinemtics work. 
 
 You will also need the xml files from <a href="https://github.com/google-deepmind/mujoco_menagerie/tree/main">here </a> or urdf files <a href="https://github.com/unitreerobotics/unitree_ros/tree/master">here</a>. The xml h1 file within the xml repo was edited to include hand joints. Replace the repo once with our edited xml <a href="https://github.com/shepai/pose-to-biped/blob/main/Robots/h1.xml">here</a>
 
-For the kinematics we edited the xml file so the robot would stay welded up right, and we could focus on joint position movement. See /Robots for thsoe files. You will still need to use the meshes from the above repo link. 
+For the kinematics we edited the xml file so the robot would stay welded up right, and we could focus on joint position movement. See /Robots for those files. You will still need to use the meshes from the above repo link. 
 
 
 ## Usage

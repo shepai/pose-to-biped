@@ -14,47 +14,49 @@ if __name__ == "__main__":
     fig = plt.figure()
     ax = fig.add_subplot(111, projection="3d")
     sim = MujocoSimulator(
-            "/its/home/drs25/mujoco-menagerie-main/unitree_h1/scene.xml"
+            "/home/dexter/Documents/GitHub/pose-to-biped/Robots/scene.xml"
         )
-    j=0
-    ki_mod=kinematics_tranfser("/its/home/drs25/unitree_ros/robots/h1_description/urdf/h1_with_hand.urdf")
+    ki_mod=kinematics_tranfser("/home/dexter/Documents/GitHub/pose-to-biped/Robots/h1_with_hand.urdf")
     with mujoco.viewer.launch_passive(sim.model, sim.data) as viewer:        
         while viewer.is_running():
             ret, frame = cap.read()
             if not ret:
                 break
             
-            plt.cla()
             landmarks = extractor.process(frame)
             landmarks,_=extractor.to_local_space(landmarks)
             hips=sim.gethips()
-            landmarks=landmarks[:,:3] 
-            landmarks=(landmarks+hips) 
-            landmarks=sim.align_human_to_robot(landmarks,np.array(list(sim.get_coordinates().values())))
-            ax.cla()
-            ax=extractor.plot_world_landmarks(landmarks,ax,
-                                            points=np.array(list(sim.get_coordinates().values())))#sim.get_coords_of(["right_elbow", "left_elbow", "right_ankle","left_ankle"]))
-            #get the hand and ankle links
-            trajectories=sim.get_trajectories(["right_wrist", "left_wrist", "right_ankle","left_ankle"],
-                                            [landmarks[16],landmarks[15],landmarks[28],landmarks[27]])
-            #trajectories=[landmarks[14],landmarks[13],landmarks[28],landmarks[27]]
-            movements = ki_mod.move_to(
-                                        ["right_hand_link", "left_hand_link", "right_ankle_link","left_ankle_link"],
-                                        targets=np.array(trajectories),
-                                        max_iter=200
-                                    )
-            for dic in movements:
-                sim.map_move(dic)
-                # Update MuJoCo kinematics
-                for i in range(1):
-                    sim.set_step(10)     
-            plt.pause(0.005)
+            if landmarks is not None:
+                landmarks=landmarks[:,:3] 
+                landmarks=(landmarks+hips) 
+                landmarks=sim.align_human_to_robot(landmarks,np.array(list(sim.get_coordinates().values())))
+                #ax.cla()
+                #ax=extractor.plot_world_landmarks(landmarks,ax,points=np.array(list(sim.get_coordinates().values())))#sim.get_coords_of(["right_elbow", "left_elbow", "right_ankle","left_ankle"]))
+                #get the hand and ankle links
+                trajectories=sim.get_trajectories(["right_wrist", "left_wrist", "right_ankle","left_ankle"],
+                                                [landmarks[16],landmarks[15],landmarks[28],landmarks[27]])
+                #trajectories=[landmarks[14],landmarks[13],landmarks[28],landmarks[27]]
+                movements = ki_mod.move_to(
+                                            ["right_hand_link", "left_hand_link", "right_ankle_link","left_ankle_link"],
+                                            targets=np.array(trajectories),
+                                            max_iter=20
+                                        )
+                for dic in movements:
+                    sim.map_move(dic)
+                    # Update MuJoCo kinematics
+                    sim.set_step(1)     
             viewer.sync()
-            cv2.imshow("Webcam", frame)
+            #frame = cv2.resize(frame, (640, 480))  # match webcam frame
+            #fig.canvas.draw()
+            #img = np.frombuffer(fig.canvas.buffer_rgba(), dtype=np.uint8)
+            #img = img.reshape(fig.canvas.get_width_height()[::-1] + (4,))
 
+            #img = img[..., :3]  # convert RGBA → RGB
+            #img = cv2.resize(img, (640, 480))
+            #frame = np.concatenate((frame), axis=1).astype(np.uint8)
+            cv2.imshow("debug_frame", frame)
             if cv2.waitKey(1) & 0xFF == 27:
                 break
-            j+=1
              
     cap.release()
     extractor.close()

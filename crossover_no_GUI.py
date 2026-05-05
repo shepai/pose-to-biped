@@ -13,17 +13,17 @@ import matplotlib.pyplot as plt
 
 if __name__ == "__main__":
     extractor = PoseExtractor(missing_value=-1.0)
-    cap = cv2.VideoCapture("/its/home/drs25/pose-to-biped/assets/walking.mp4")
+    cap = cv2.VideoCapture("/home/dexter/Documents/GitHub/pose-to-biped/assets/walking.mp4")
     sim = MujocoSimulator(
-            "/its/home/drs25/mujoco-menagerie-main/unitree_h1/scene.xml"
+            "/home/dexter/Documents/GitHub/pose-to-biped/Robots/scene.xml"
         )
     max_w = sim.model.vis.global_.offwidth
     max_h = sim.model.vis.global_.offheight
     renderer = mujoco.Renderer(sim.model, height=max_h, width=max_w)
     j=0
-    ki_mod=kinematics_tranfser("/its/home/drs25/unitree_ros/robots/h1_description/urdf/h1_with_hand.urdf")
+    ki_mod=kinematics_tranfser("/home/dexter/Documents/GitHub/pose-to-biped/Robots/h1_with_hand.urdf")
     # Output video writer
-    output_path = "/its/home/drs25/pose-to-biped/assets/output_record.mp4"
+    output_path = "/home/dexter/Documents/GitHub/pose-to-biped/assets/output_record2.mp4"
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
     out = cv2.VideoWriter(output_path, fourcc, 25, (640*3, 480))
     fig = plt.figure()
@@ -60,8 +60,10 @@ if __name__ == "__main__":
         pixels = cv2.cvtColor(pixels, cv2.COLOR_RGB2BGR)
         frame = cv2.resize(frame, (640, 480))  # match webcam frame
         fig.canvas.draw()
-        img = np.frombuffer(fig.canvas.tostring_rgb(), dtype=np.uint8)
-        img = img.reshape(fig.canvas.get_width_height()[::-1] + (3,))
+        img = np.frombuffer(fig.canvas.buffer_rgba(), dtype=np.uint8)
+        img = img.reshape(fig.canvas.get_width_height()[::-1] + (4,))
+
+        img = img[..., :3]  # convert RGBA → RGB
         img = cv2.resize(img, (640, 480))
         frame = np.concatenate((frame, img, pixels), axis=1).astype(np.uint8)
         out.write(frame)
