@@ -4,12 +4,13 @@ Person tracking and recreation in MuJoCo simualtor on a robot.
 ## Dependencies
 
 ```[bash]
-pip install mujuco
+pip install mujoco
 pip install --upgrade mujoco
 pip install opencv-python
 pip install pin-pink
 pip install osqp
 pip install mediapipe
+pip install matplotlib
 ```
 Be aware that pin-pink works better on Linux, we have not been able to get this running on Windows. This library is needed kinemtics work. 
 
