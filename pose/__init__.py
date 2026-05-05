@@ -78,17 +78,14 @@ class PoseExtractor:
         # Get torso points (left and right hip)
         left_hip = landmarks[23, :3]
         right_hip = landmarks[24, :3]
-        
         # Check for missing hips
         if (
             np.any(left_hip == missing_value)
             or np.any(right_hip == missing_value)
         ):
             return None, None
-        
         # Compute midpoint
         root = (left_hip + right_hip) / 2.0
-
         # Subtract root from all valid landmarks
         for i in range(33):
             if not np.any(landmarks[i, :3] == missing_value):

@@ -35,10 +35,10 @@ if __name__ == "__main__":
             break
         landmarks = extractor.process(frame)
         landmarks,_=extractor.to_local_space(landmarks)
-        hips=sim.gethips()
+        #hips=sim.gethips()
         landmarks=landmarks[:,:3] 
-        landmarks=(landmarks+hips) 
-        landmarks=sim.align_human_to_robot(landmarks,np.array(list(sim.get_coordinates().values())))
+        #landmarks=(landmarks+hips) 
+        landmarks=sim.align_human_to_robot(landmarks)
         ax.cla()
         ax=extractor.plot_world_landmarks(landmarks,ax,
                                           points=np.array(list(sim.get_coordinates().values())))#sim.get_coords_of(["right_elbow", "left_elbow", "right_ankle","left_ankle"]))
