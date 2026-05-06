@@ -116,8 +116,10 @@ class MujocoSimulator:
             "act": self.data.act.copy() if self.data.act is not None else None
         }
         return state
-    def map_move(self, joint_dict):
-        for name, value in joint_dict.items():
+    def map_move(self, joint_dict, kp=150, kd=30):
+        self.data.ctrl[:] = 0.0
+
+        for name, target in joint_dict.items():
             mj_name = name.replace("_joint", "")
 
             joint_id = mujoco.mj_name2id(
@@ -126,11 +128,24 @@ class MujocoSimulator:
                 mj_name
             )
 
-            if joint_id != -1:
-                qpos_adr = self.model.jnt_qposadr[joint_id]
+            actuator_id = mujoco.mj_name2id(
+                self.model,
+                mujoco.mjtObj.mjOBJ_ACTUATOR,
+                mj_name
+            )
 
-                self.data.qpos[qpos_adr:qpos_adr + len(np.atleast_1d(value))] = value
-        self.data.qvel[:] = 0
+            if joint_id == -1 or actuator_id == -1:
+                continue
+
+            qpos_adr = self.model.jnt_qposadr[joint_id]
+            qvel_adr = self.model.jnt_dofadr[joint_id]
+
+            q = self.data.qpos[qpos_adr]
+            dq = self.data.qvel[qvel_adr]
+
+            error = np.asarray(target).squeeze() - q
+
+            self.data.ctrl[actuator_id] = kp * error - kd * dq
         mujoco.mj_forward(self.model, self.data)
     def set_state(self,state):
         self.data.qpos=state["qpos"]
@@ -152,26 +167,6 @@ class MujocoSimulator:
         # translate to robot centroid
         aligned = H_scaled + (R_mean - H_mean * scale)
         return aligned
-    def rotate_robot_to_human(self, human_pose):
-        robot_coords = np.array(list(self.get_coordinates().values()), dtype=np.float64)
-        H = human_pose[[11, 12, 23, 24, 28, 27]].astype(np.float64)
-        R = robot_coords[[13, 18, 6, 1, 5, 10]].astype(np.float64)
-        Hc = H - H.mean(axis=0)
-        Rc = R - R.mean(axis=0)
-        R_swapped = np.zeros_like(Rc)
-        R_swapped[:, 0] = Rc[:, 1]  # Swap X and Y
-        R_swapped[:, 1] = Rc[:, 0]
-        R_swapped[:, 2] = Rc[:, 2]
-        Hcov = R_swapped.T @ Hc 
-        U, S, Vt = np.linalg.svd(Hcov)
-        R_opt = Vt.T @ U.T
-        if np.linalg.det(R_opt) < 0:
-            Vt[-1] *= -1
-            R_opt = Vt.T @ U.T
-        rot_obj = Rot.from_matrix(R_opt)
-        euler_xyz = rot_obj.as_euler('xyz', degrees=False)
-        self.set_orientation(euler_xyz)
-        
     def set_points(self, points):
         for i, p in enumerate(points):
             sid = self.model.site(f"p{i}").id
@@ -181,27 +176,41 @@ class MujocoSimulator:
         n_sites = self.model.nsite
         for i in range(n_sites):
             self.model.site_rgba[i, 3] = 0.0
-    def set_orientation(self, angle):
-        # angle = [roll, pitch, yaw] in radians
-        target_quat = np.zeros(4)
-        mujoco.mju_euler2Quat(target_quat, angle, 'xyz')
-        
-        self.data.qpos[3:7] = target_quat
-        
-        self.align_to_floor() 
+    def rotate_robot_to_human(self, human_pose):
+        robot_coords = np.array(list(self.get_coordinates().values()), dtype=np.float64)
+        # Use the same indices as your original
+        H = human_pose[[11, 12, 23, 24]].astype(np.float64)
+        R = robot_coords[[13, 18, 6, 1]].astype(np.float64)
+        Hc = H - H.mean(axis=0)
+        Rc = R - R.mean(axis=0)
+        # 1. Standard Kabsch
+        Hcov = Rc.T @ Hc 
+        U, S, Vt = np.linalg.svd(Hcov)
+        R_opt = Vt.T @ U.T
 
-        # Synchronize mocap if using it
-        if self.model.nmocap > 0:
-            self.data.mocap_quat[0] = target_quat
-            self.data.mocap_pos[0] = self.data.qpos[0:3]
+        if np.linalg.det(R_opt) < 0:
+            Vt[-1] *= -1
+            R_opt = Vt.T @ U.T
+        print(R_opt)
+        t_opt = H.mean(axis=0) - R_opt @ R.mean(axis=0)
+        self.set_orientation(R_opt,t_opt)
+    def set_orientation(self, R_opt, t_opt):
+        
+        #self.data.eq_active[:] = 0 
+        self.data.qpos[0:3] = t_opt
 
-        # Use mj_forward to update kinematics without resetting dynamics
-        self.data.qvel[:] = 0 
+        quat = Rot.from_matrix(R_opt).as_quat()
+        self.data.qpos[3:7] = [quat[3], quat[0], quat[1], quat[2]]
+
+        self.data.qvel[:] = 0
+
         mujoco.mj_forward(self.model, self.data)
-        
-        # Save the pose for your controller
+        self.align_to_floor() 
+        mujoco.mj_forward(self.model, self.data)
+        #self.data.eq_active[:] = 1
         joint_start = self.model.nq - self.model.nu
         self.initial = self.data.qpos[joint_start:].copy()
+
     def get_robot_lowest_point(self):
         mujoco.mj_forward(self.model, self.data)
         min_z = float('inf')

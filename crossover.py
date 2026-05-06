@@ -67,8 +67,7 @@ if __name__ == "__main__":
             sim.set_step(1)  
             viewer.sync()
         sim.rotate_robot_to_human(landmarks)
-        sim.set_step(1)
-        viewer.sync()
+        ki_mod.equalise_sims(sim)
         while viewer.is_running():
             ret, frame = cap.read()
             if not ret:
