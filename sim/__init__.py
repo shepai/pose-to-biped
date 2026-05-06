@@ -33,9 +33,9 @@ class MujocoSimulator:
         self.point_ids = [self.model.site(name).id for name in ["p0","p1","p2","p3","p4","p5"]]
     def reset(self):
         mujoco.mj_resetData(self.model, self.data)
-        joint_start = self.model.nq - self.model.nu
-        joint_end = self.model.nq
-        self.data.qpos[:]=self.initial[joint_start:joint_end].copy()
+        #joint_start = self.model.nq - self.model.nu
+        #joint_end = self.model.nq
+        #self.data.qpos[joint_start:joint_end]=self.initial[joint_start:joint_end].copy()
         if not self.gravity:
             self.model.opt.gravity[:] = [0, 0, 0]
     def set_position(self, target_qpos, kp=200.0, kd=50.0):
@@ -47,7 +47,27 @@ class MujocoSimulator:
 
         torque = kp * pos_error + kd * vel_error
         self.data.ctrl[:] = torque
-        
+    def get_velocities(self):
+        return self.data.ctrl[:]
+    def get_imu(self, body_name="torso_link"):
+        mujoco.mj_forward(self.model, self.data)
+
+        body_id = self.model.body(body_name).id
+
+        quat = self.data.xquat[body_id]
+
+        # fallback safety
+        if np.linalg.norm(quat) < 1e-6:
+            return np.zeros(9, dtype=np.float32)
+
+        # MuJoCo (w,x,y,z) → SciPy (x,y,z,w)
+        r = Rot.from_quat([quat[1], quat[2], quat[3], quat[0]])
+        rpy = r.as_euler("xyz")
+
+        gyro = self.data.cvel[body_id][3:]
+        accel = self.data.cacc[body_id][:3]
+
+        return np.concatenate([rpy, gyro, accel]).astype(np.float32)
     def get_position(self):
         joint_qpos_start = self.model.nq - self.model.nu
         return self.data.qpos[joint_qpos_start:]
@@ -116,9 +136,9 @@ class MujocoSimulator:
             "act": self.data.act.copy() if self.data.act is not None else None
         }
         return state
-    def map_move(self, joint_dict, kp=150, kd=30):
+    def map_move(self, joint_dict, corrections, kp=150, kd=30):
         self.data.ctrl[:] = 0.0
-
+        j=0
         for name, target in joint_dict.items():
             mj_name = name.replace("_joint", "")
 
@@ -145,8 +165,18 @@ class MujocoSimulator:
 
             error = np.asarray(target).squeeze() - q
 
-            self.data.ctrl[actuator_id] = kp * error - kd * dq
+            self.data.ctrl[actuator_id] = kp * error - kd * dq +corrections[j]
+            j+=1
         mujoco.mj_forward(self.model, self.data)
+    def zero(self,joint_dict):
+        for name, target in joint_dict.items():
+            mj_name = name.replace("_joint", "")
+            actuator_id = mujoco.mj_name2id(
+                self.model,
+                mujoco.mjtObj.mjOBJ_ACTUATOR,
+                mj_name
+            )
+            self.data.ctrl[actuator_id]=0
     def set_state(self,state):
         self.data.qpos=state["qpos"]
         self.data.qvel=state["qvel"]

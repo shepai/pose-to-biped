@@ -85,6 +85,8 @@ if __name__ == "__main__":
                     sim.map_move(dic)
                     # Update MuJoCo kinematics
                     sim.set_step(1)     
+                    sim.zero(dic)
+                    viewer.sync()
             else: 
                 pass #will need to reset 
             sim.set_points([landmarks[16],landmarks[15],landmarks[28],landmarks[27],landmarks[12],landmarks[11]])

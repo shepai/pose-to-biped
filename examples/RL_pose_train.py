@@ -11,20 +11,21 @@ vec_env = robo_gym(
     path_to_scene="/home/dexter/Documents/GitHub/pose-to-biped/Robots/scene.xml",
     path_to_urdf="/home/dexter/Documents/GitHub/pose-to-biped/Robots/h1_with_hand.urdf"
 )
-
-model = PPO("MlpPolicy", vec_env, verbose=1)
-model.learn(total_timesteps=25000)
-model.save("ppo_cartpole")
+vec_env.set_dataset("/home/dexter/Documents/GitHub/pose-to-biped/models/")
+vec_env._set_log("/home/dexter/Documents/GitHub/pose-to-biped/models/results/log")
+model = PPO("MlpPolicy", vec_env, device="cpu",verbose=1,n_steps=256)
+model.learn(total_timesteps=250000)
+model.save("/home/dexter/Documents/GitHub/pose-to-biped/models/test1")
 
 del model # remove to demonstrate saving and loading
 
-model = PPO.load("ppo_cartpole")
+model = PPO.load("/home/dexter/Documents/GitHub/pose-to-biped/models/test1")
 
 obs = vec_env.reset()
 while True:
     
     action, _states = model.predict(obs)
-    obs, rewards, dones, info = vec_env.step(action)
+    obs, rewards, dones, trunc,info = vec_env.step(action)
     vec_env.render("human")
 
 
