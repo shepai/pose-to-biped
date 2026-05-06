@@ -136,7 +136,7 @@ class MujocoSimulator:
             "act": self.data.act.copy() if self.data.act is not None else None
         }
         return state
-    def map_move(self, joint_dict, corrections, kp=150, kd=30):
+    def map_move(self, joint_dict, corrections=None, kp=150, kd=30):
         self.data.ctrl[:] = 0.0
         j=0
         for name, target in joint_dict.items():
@@ -164,8 +164,9 @@ class MujocoSimulator:
             dq = self.data.qvel[qvel_adr]
 
             error = np.asarray(target).squeeze() - q
-
-            self.data.ctrl[actuator_id] = kp * error - kd * dq +corrections[j]
+            if corrections is not None:
+                self.data.ctrl[actuator_id] = kp * error - kd * dq +corrections[j]
+            else:  self.data.ctrl[actuator_id] = kp * error - kd * dq
             j+=1
         mujoco.mj_forward(self.model, self.data)
     def zero(self,joint_dict):

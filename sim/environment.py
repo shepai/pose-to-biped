@@ -90,7 +90,8 @@ class robo_gym(gym.Env):
         reward = self._compute_reward()
         if self.iter%100==0: self.save()
         self.iter+=1
-        return self._get_obs(), reward, self._check_fallen(), False, {}
+        terminated = self._check_fallen()
+        return self._get_obs(), reward, terminated, False, {}
     def _compute_reward(self): 
         #get how close the joint positions are to the coordinates
         landmarks=self.dataset.current_landmarks()
@@ -113,6 +114,7 @@ class robo_gym(gym.Env):
             self.sim.get_imu()                 # IMU placeholder
         ]).astype(np.float32)
     def reset(self, seed=None, options=None):
+        print("reset")
         self.sim.reset()
         self.dataset.i = 0
         self.dataset.ind_count = 0
