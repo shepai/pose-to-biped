@@ -30,6 +30,7 @@ class MujocoSimulator:
         for i in range(self.model.njnt):
             self.names=self.model.joint(i).name
         self.transform=False
+        self.point_ids = [self.model.site(name).id for name in ["p0","p1","p2","p3","p4","p5"]]
     def reset(self):
         mujoco.mj_resetData(self.model, self.data)
         joint_start = self.model.nq - self.model.nu
@@ -153,62 +154,54 @@ class MujocoSimulator:
         return aligned
     def rotate_robot_to_human(self, human_pose):
         robot_coords = np.array(list(self.get_coordinates().values()), dtype=np.float64)
-
-        # Corresponding joint subsets
         H = human_pose[[11, 12, 23, 24, 28, 27]].astype(np.float64)
         R = robot_coords[[13, 18, 6, 1, 5, 10]].astype(np.float64)
-
-        # --- 1. Center both point sets ---
-        H_mean = H.mean(axis=0)
-        R_mean = R.mean(axis=0)
-
-        Hc = H - H_mean
-        Rc = R - R_mean
-
-        # --- 2. Kabsch alignment (optimal rotation) ---
-        Hcov = Hc.T @ Rc
+        Hc = H - H.mean(axis=0)
+        Rc = R - R.mean(axis=0)
+        R_swapped = np.zeros_like(Rc)
+        R_swapped[:, 0] = Rc[:, 1]  # Swap X and Y
+        R_swapped[:, 1] = Rc[:, 0]
+        R_swapped[:, 2] = Rc[:, 2]
+        Hcov = R_swapped.T @ Hc 
         U, S, Vt = np.linalg.svd(Hcov)
-
         R_opt = Vt.T @ U.T
-
-        # Fix reflection issue (ensure proper rotation)
         if np.linalg.det(R_opt) < 0:
-            Vt[-1, :] *= -1
+            Vt[-1] *= -1
             R_opt = Vt.T @ U.T
-
-        # --- 3. Convert rotation matrix to Euler angles ---
         rot_obj = Rot.from_matrix(R_opt)
         euler_xyz = rot_obj.as_euler('xyz', degrees=False)
-
-        # Debug (optional)
-        print("Euler (deg):", np.degrees(euler_xyz))
-
-        # --- 4. Apply to robot ---
         self.set_orientation(euler_xyz)
-
-    def set_orientation(self, angle):
-        angles_rad = angle#np.deg2rad(angle) # angles = [roll, pitch, yaw]
-        self.data.eq_active[:] = 0
-        mujoco.mj_resetData(self.model, self.data) 
-        target_quat = np.zeros(4)
-        mujoco.mju_euler2Quat(target_quat, angles_rad, 'xyz')
         
-        # 4. Apply to the robot base
+    def set_points(self, points):
+        for i, p in enumerate(points):
+            sid = self.model.site(f"p{i}").id
+            self.data.site_xpos[sid] = p
+            self.model.site_rgba[sid, 3] = 1.0
+    def hide_points(self):
+        n_sites = self.model.nsite
+        for i in range(n_sites):
+            self.model.site_rgba[i, 3] = 0.0
+    def set_orientation(self, angle):
+        # angle = [roll, pitch, yaw] in radians
+        target_quat = np.zeros(4)
+        mujoco.mju_euler2Quat(target_quat, angle, 'xyz')
+        
         self.data.qpos[3:7] = target_quat
         
-        # 5. Stop physics glitches
-        self.data.qvel[:] = 0 
-        mujoco.mj_forward(self.model, self.data)
+        self.align_to_floor() 
+
+        # Synchronize mocap if using it
         if self.model.nmocap > 0:
             self.data.mocap_quat[0] = target_quat
-            # Also update position if you moved it
-            self.data.mocap_pos[0] = self.data.qpos[0:3] 
-        self.align_to_floor()
-        self.data.eq_active[:] = 1
+            self.data.mocap_pos[0] = self.data.qpos[0:3]
+
+        # Use mj_forward to update kinematics without resetting dynamics
+        self.data.qvel[:] = 0 
+        mujoco.mj_forward(self.model, self.data)
+        
+        # Save the pose for your controller
         joint_start = self.model.nq - self.model.nu
-        joint_end = self.model.nq
-        self.initial=self.data.qpos[:]
-        self.initial = self.initial[joint_start:joint_end].copy()
+        self.initial = self.data.qpos[joint_start:].copy()
     def get_robot_lowest_point(self):
         mujoco.mj_forward(self.model, self.data)
         min_z = float('inf')

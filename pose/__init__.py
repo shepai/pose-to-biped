@@ -124,7 +124,7 @@ class PoseExtractor:
 
     def close(self):
         self.pose.close()
-    def plot_world_landmarks(self, landmarks, ax, points=[],scale=True):
+    def plot_world_landmarks(self, landmarks, ax, points=[],scale=True,pointnames=[]):
         """
         3D visualization for world landmarks (meters).
         Safely handles None and corrupted inputs.
@@ -159,6 +159,8 @@ class PoseExtractor:
         for i in range(len(points)):
             point=points[i]
             ax.scatter(point[0], point[1], point[2], c="red", s=30)
+            if i<=len(pointnames):
+                ax.text(point[0], point[1], point[2],pointnames[i])
         # Draw skeleton connections
         for start, end in self.mp_pose.POSE_CONNECTIONS:
             if (

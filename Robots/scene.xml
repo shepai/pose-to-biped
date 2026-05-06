@@ -19,6 +19,12 @@
   <worldbody>
     <light pos="0 0 3.5" dir="0 0 -1" directional="true"/>
     <geom name="floor" size="0 0 0.05" type="plane" material="groundplane"/>
+    <site name="p0" pos="0 0 0" size="0.01" rgba="1 0 0 0"/>
+  <site name="p1" pos="0 0 0" size="0.01" rgba="1 0 0 0"/>
+  <site name="p2" pos="0 0 0" size="0.01" rgba="1 1 0 0"/>
+  <site name="p3" pos="0 0 0" size="0.01" rgba="1 1 0 0"/>
+  <site name="p4" pos="0 0 0" size="0.01" rgba="1 0 1 0"/>
+  <site name="p5" pos="0 0 0" size="0.01" rgba="1 0 1 0"/>
   </worldbody>
 
   <keyframe>
