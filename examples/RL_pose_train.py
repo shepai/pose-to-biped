@@ -21,11 +21,19 @@ del model # remove to demonstrate saving and loading
 
 model = PPO.load("/home/dexter/Documents/GitHub/pose-to-biped/models/test2")
 
-obs = vec_env.reset()
-while True:
-    
-    action, _states = model.predict(obs)
-    obs, rewards, dones, trunc,info = vec_env.step(action)
-    vec_env.render("human")
 
+import mujoco
+obs,_ = vec_env.reset()
+with mujoco.viewer.launch_passive(vec_env.sim.model, vec_env.sim.data) as viewer: 
+    viewer.cam.distance = 5.0       
+    while True:
+        action, _states = model.predict(obs)
+        landmarks=vec_env.dataset.current_landmarks()
+        landmarks,_=vec_env.pose.to_local_space(landmarks)
+        landmarks=landmarks[:,:3] 
+        landmarks=vec_env.sim.align_human_to_robot(landmarks)
+        obs, rewards, dones, trunc,info = vec_env.step(action)
+        if dones: vec_env.reset()
+        vec_env.sim.set_points([landmarks[16],landmarks[15],landmarks[28],landmarks[27],landmarks[12],landmarks[11]])
+        viewer.sync()
 

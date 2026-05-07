@@ -65,7 +65,9 @@ class robo_gym(gym.Env):
     def save(self):
         np.save(self.filename,np.array(self.history))
     def step(self,correction):
-        landmarks,ind=self.dataset.next_landmarks()
+        landmarks=None 
+        while landmarks is None: #ensure that it actualyl has landmarks
+            landmarks,ind=self.dataset.next_landmarks()
         landmarks,_=self.pose.to_local_space(landmarks)
         landmarks=landmarks[:,:3] 
         landmarks=self.sim.align_human_to_robot(landmarks)
