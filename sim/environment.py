@@ -84,7 +84,7 @@ class robo_gym(gym.Env):
         for dic in self.theta_ref:
             self.sim.map_move(dic,correction)
             # Update MuJoCo kinematics
-            self.sim.set_step(5)     
+            self.sim.set_step(1)     
         map=self.sim.get_coordinates()
         self.current_positions=[map["right_wrist"], map["left_wrist"], map["right_ankle"], map["left_ankle"]]
         reward = self._compute_reward()
@@ -115,8 +115,8 @@ class robo_gym(gym.Env):
         ]).astype(np.float32)
     def reset(self, seed=None, options=None):
         self.sim.reset()
-        self.dataset.i = 0
-        self.dataset.ind_count = 0
+        #self.dataset.i = 0
+        #self.dataset.ind_count = 0
         super().reset(seed=seed)
         self.current_joints = np.zeros_like(self.action_space.sample())
         self.theta_ref = np.zeros_like(self.current_joints)
