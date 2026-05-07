@@ -114,7 +114,6 @@ class robo_gym(gym.Env):
             self.sim.get_imu()                 # IMU placeholder
         ]).astype(np.float32)
     def reset(self, seed=None, options=None):
-        print("reset")
         self.sim.reset()
         self.dataset.i = 0
         self.dataset.ind_count = 0
@@ -131,4 +130,4 @@ class robo_gym(gym.Env):
         robot=np.array(list(self.sim.get_coordinates().values()))[[13, 18, 6, 1, 5, 10]]
         distances = np.linalg.norm(landmarks - robot, axis=1)
         avg_dist = np.mean(distances)
-        return avg_dist > 0.3
+        return avg_dist > 0.4

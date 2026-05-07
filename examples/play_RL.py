@@ -24,7 +24,9 @@ with mujoco.viewer.launch_passive(vec_env.sim.model, vec_env.sim.data) as viewer
         landmarks=landmarks[:,:3] 
         landmarks=vec_env.sim.align_human_to_robot(landmarks)
         obs, rewards, dones, trunc,info = vec_env.step(action)
+        if dones: vec_env.reset()
         vec_env.sim.set_points([landmarks[16],landmarks[15],landmarks[28],landmarks[27],landmarks[12],landmarks[11]])
         viewer.sync()
+        
 
 
