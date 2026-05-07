@@ -192,7 +192,7 @@ class MujocoSimulator:
         Hc = H - H_mean
         Rc = R - R_mean
         # SCALE ONLY (no rotation)
-        scale = np.sqrt(np.sum(Rc ** 2) / np.sum(Hc ** 2))
+        scale = np.sqrt(np.sum(Rc ** 2) / np.sum(Hc ** 2)+0.00001)
         # apply scaling only
         H_scaled = human_pose.astype(np.float64) * scale
         # translate to robot centroid

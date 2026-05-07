@@ -24,7 +24,7 @@ class dataset:
             self.ind_count+=1
             print("INDEX CHANGE")
             changed=True
-        if self.i>len(self.X):
+        if self.i>=len(self.X):
             self.i=0 
         pose=self.X[self.i]
         self.i+=1
@@ -68,10 +68,10 @@ class robo_gym(gym.Env):
         landmarks=None 
         while landmarks is None: #ensure that it actualyl has landmarks
             landmarks,ind=self.dataset.next_landmarks()
-        landmarks,_=self.pose.to_local_space(landmarks)
+            landmarks,_=self.pose.to_local_space(landmarks)
         landmarks=landmarks[:,:3] 
         landmarks=self.sim.align_human_to_robot(landmarks)
-        if ind:
+        if ind: #if start of video then reset the position
             self.sim.rotate_robot_to_human(landmarks)
         self.current_coords=[landmarks[14],landmarks[13],landmarks[28],landmarks[27]]
         trajectories=self.sim.get_trajectories(["right_wrist", "left_wrist", "right_ankle","left_ankle"],
@@ -96,9 +96,11 @@ class robo_gym(gym.Env):
         return self._get_obs(), reward, terminated, False, {}
     def _compute_reward(self): 
         #get how close the joint positions are to the coordinates
-        landmarks=self.dataset.current_landmarks()
-        landmarks,_=self.pose.to_local_space(landmarks)
-        landmarks=landmarks[:,:3]
+        landmarks=None 
+        while landmarks is None: #ensure that it actualyl has landmarks
+            landmarks,_=self.dataset.next_landmarks()
+            landmarks,_=self.pose.to_local_space(landmarks)
+        landmarks=landmarks[:,:3] 
         landmarks=self.sim.align_human_to_robot(landmarks)[[11, 12, 23, 24, 28, 27]]
         robot=np.array(list(self.sim.get_coordinates().values()))[[13, 18, 6, 1, 5, 10]]
         distances = np.linalg.norm(landmarks - robot, axis=1)
@@ -125,9 +127,11 @@ class robo_gym(gym.Env):
         return self._get_obs(), {}
     def _check_fallen(self):
         # if too far away from points to really recover
-        landmarks=self.dataset.current_landmarks()
-        landmarks,_=self.pose.to_local_space(landmarks)
-        landmarks=landmarks[:,:3]
+        landmarks=None 
+        while landmarks is None: #ensure that it actualyl has landmarks
+            landmarks,_=self.dataset.next_landmarks()
+            landmarks,_=self.pose.to_local_space(landmarks)
+        landmarks=landmarks[:,:3] 
         landmarks=self.sim.align_human_to_robot(landmarks)[[11, 12, 23, 24, 28, 27]]
         robot=np.array(list(self.sim.get_coordinates().values()))[[13, 18, 6, 1, 5, 10]]
         distances = np.linalg.norm(landmarks - robot, axis=1)
