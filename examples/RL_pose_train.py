@@ -13,7 +13,7 @@ vec_env = robo_gym(
 )
 vec_env.set_dataset("/home/dexter/Documents/GitHub/pose-to-biped/models/")
 vec_env._set_log("/home/dexter/Documents/GitHub/pose-to-biped/models/results/log")
-model = PPO("MlpPolicy", vec_env, device="cpu",verbose=1,n_steps=256)
+model = PPO("MlpPolicy", vec_env, device="cpu",verbose=1,n_steps=256,max_grad_norm=0.5)
 model.learn(total_timesteps=25000)
 model.save("/home/dexter/Documents/GitHub/pose-to-biped/models/test2")
 
