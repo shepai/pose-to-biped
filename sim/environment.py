@@ -53,7 +53,7 @@ class robo_gym(gym.Env):
         )
         self.current_coords=None
         self.current_positions=None 
-        
+        self.current_joints=self.sim.get_position()
         self.dataset=None 
         self.history=[]
         self.filename=".log"
@@ -101,6 +101,8 @@ class robo_gym(gym.Env):
         if self.iter%100==0: self.save()
         self.iter+=1
         terminated = self._check_fallen()
+        self.ki_mod.equalise_sims(self.sim)
+        self.current_joints=self.sim.get_position()
         return self._get_obs(), reward, terminated, False, {}
     def _compute_reward(self): 
         #get how close the joint positions are to the coordinates
@@ -119,12 +121,16 @@ class robo_gym(gym.Env):
         self.history.append(tracking+stability)
         return tracking + stability
     def _get_obs(self): 
-        return np.concatenate([
+        obs=np.concatenate([
             np.asarray(self.sim.get_position()),        # joint angles
             self.sim.get_velocities(),  # velocities (placeholder)
             np.zeros_like(self.current_joints),             # reference pose
-            self.sim.get_imu()                 # IMU placeholder
-        ]).astype(np.float32)
+            self.sim.get_imu()   ]).astype(np.float32)              # IMU placeholder
+        if np.isnan(obs).any() or np.isinf(obs).any():
+            print("Warning: NaN or Inf detected in observations! Cleaning up.")
+            obs = np.nan_to_num(obs, nan=0.0, posinf=1.0, neginf=-1.0)
+        return obs
+        
     def reset(self, seed=None, options=None):
         self.sim.reset()
         #self.dataset.i = 0
@@ -132,6 +138,9 @@ class robo_gym(gym.Env):
         super().reset(seed=seed)
         self.current_joints = np.zeros_like(self.action_space.sample())
         self.theta_ref = np.zeros_like(self.current_joints)
+        obs = self._get_obs()
+        if np.isnan(obs).any():
+            print("CRITICAL ERROR: Initial observation contains NaN!")
         return self._get_obs(), {}
     def _check_fallen(self):
         # if too far away from points to really recover
