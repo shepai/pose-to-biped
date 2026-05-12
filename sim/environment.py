@@ -6,6 +6,7 @@ from sim import *
 from sim.kinematics import kinematics_tranfser 
 import gymnasium as gym
 from pose import PoseExtractor, PARENTS
+import osqp 
 
 class dataset:
     def __init__(self):
@@ -76,12 +77,19 @@ class robo_gym(gym.Env):
         self.current_coords=[landmarks[14],landmarks[13],landmarks[28],landmarks[27]]
         trajectories=self.sim.get_trajectories(["right_wrist", "left_wrist", "right_ankle","left_ankle"],
                                           [landmarks[14],landmarks[13],landmarks[28],landmarks[27]])
-        
-        self.theta_ref=self.ki_mod.move_to(
-                                    ["right_hand_link", "left_hand_link", "right_ankle_link","left_ankle_link"],
-                                    targets=np.array(trajectories),
-                                    max_iter=20
-                                )
+        while True:
+            try:
+                trajectories = np.nan_to_num(trajectories, nan=0.0, posinf=1.0, neginf=-1.0)
+                trajectories = np.clip(trajectories, a_min=-1.5, a_max=1.5) 
+                self.theta_ref=self.ki_mod.move_to(
+                                            ["right_hand_link", "left_hand_link", "right_ankle_link","left_ankle_link"],
+                                            targets=np.array(trajectories),
+                                            max_iter=20
+                                        )
+                break
+            except osqp.interface.OSQPException: 
+                print("OSQP error")
+                self.ki_mod.equalise_sims(self.sim)
         #step through sim
         for dic in self.theta_ref:
             self.sim.map_move(dic,correction)
