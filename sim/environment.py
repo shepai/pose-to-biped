@@ -7,6 +7,7 @@ from sim.kinematics import kinematics_tranfser
 import gymnasium as gym
 from pose import PoseExtractor, PARENTS
 import osqp 
+from numpy.linalg import LinAlgError 
 
 class dataset:
     def __init__(self):
@@ -27,6 +28,7 @@ class dataset:
             changed=True
         if self.i>=len(self.X):
             self.i=0 
+            self.ind_count=0
         pose=self.X[self.i]
         self.i+=1
         return pose,changed
@@ -47,7 +49,7 @@ class robo_gym(gym.Env):
             dtype=np.float32
         )
         self.observation_space = gym.spaces.Box(
-            low=-np.inf, high=np.inf,
+            low=-1000.0, high=1000.0,
             shape=(num_joints * 2 + num_joints + len(self.imu),),  # pos, vel, ref, IMU
             dtype=np.float32
         )
@@ -55,6 +57,7 @@ class robo_gym(gym.Env):
         self.current_positions=None 
         self.current_joints=self.sim.get_position()
         self.dataset=None 
+        self.landmarks=None
         self.history=[]
         self.filename=".log"
         self.iter=0
@@ -67,13 +70,22 @@ class robo_gym(gym.Env):
         np.save(self.filename,np.array(self.history))
     def step(self,correction):
         landmarks=None 
+        resetting=False
         while landmarks is None: #ensure that it actualyl has landmarks
-            landmarks,ind=self.dataset.next_landmarks()
-            landmarks,_=self.pose.to_local_space(landmarks)
-        landmarks=landmarks[:,:3] 
-        landmarks=self.sim.align_human_to_robot(landmarks)
-        if ind: #if start of video then reset the position
-            self.sim.rotate_robot_to_human(landmarks)
+            try:
+                while landmarks is None: #ensure that it actualyl has landmarks
+                    landmarks,ind=self.dataset.next_landmarks()
+                    landmarks,_=self.pose.to_local_space(landmarks)
+                landmarks=landmarks[:,:3] 
+                landmarks=self.sim.align_human_to_robot(landmarks)
+                if ind or resetting: #if start of video then reset the position
+                    self.sim.rotate_robot_to_human(landmarks)
+            except LinAlgError:
+                landmarks=None 
+                self.sim.reset()
+                resetting=True
+        self.landmarks=landmarks.copy()
+        
         self.current_coords=[landmarks[14],landmarks[13],landmarks[28],landmarks[27]]
         trajectories=self.sim.get_trajectories(["right_wrist", "left_wrist", "right_ankle","left_ankle"],
                                           [landmarks[14],landmarks[13],landmarks[28],landmarks[27]])
@@ -106,20 +118,19 @@ class robo_gym(gym.Env):
         return self._get_obs(), reward, terminated, False, {}
     def _compute_reward(self): 
         #get how close the joint positions are to the coordinates
-        landmarks=None 
-        while landmarks is None: #ensure that it actualyl has landmarks
-            landmarks,_=self.dataset.next_landmarks()
-            landmarks,_=self.pose.to_local_space(landmarks)
-        landmarks=landmarks[:,:3] 
-        landmarks=self.sim.align_human_to_robot(landmarks)[[11, 12, 23, 24, 28, 27]]
+        landmarks=self.sim.align_human_to_robot(self.landmarks)[[11, 12, 23, 24, 28, 27]]
         robot=np.array(list(self.sim.get_coordinates().values()))[[13, 18, 6, 1, 5, 10]]
         distances = np.linalg.norm(landmarks - robot, axis=1)
         avg_dist = np.mean(distances)
         tracking = -avg_dist
         fallen = self._check_fallen()
         stability = -10.0 if fallen else 0.5
-        self.history.append(tracking+stability)
-        return tracking + stability
+        reward=float(tracking + stability)
+        if np.isnan(reward): 
+            print("WARNING REWARD IS NAN")
+            reward=-100
+        self.history.append(reward)
+        return reward
     def _get_obs(self): 
         obs=np.concatenate([
             np.asarray(self.sim.get_position()),        # joint angles
@@ -129,6 +140,7 @@ class robo_gym(gym.Env):
         if np.isnan(obs).any() or np.isinf(obs).any():
             print("Warning: NaN or Inf detected in observations! Cleaning up.")
             obs = np.nan_to_num(obs, nan=0.0, posinf=1.0, neginf=-1.0)
+        assert obs.shape == self.observation_space.shape, f"Shape mismatch! Space expects {self.observation_space.shape}, got {obs.shape}"
         return obs
         
     def reset(self, seed=None, options=None):
@@ -153,4 +165,7 @@ class robo_gym(gym.Env):
         robot=np.array(list(self.sim.get_coordinates().values()))[[13, 18, 6, 1, 5, 10]]
         distances = np.linalg.norm(landmarks - robot, axis=1)
         avg_dist = np.mean(distances)
-        return avg_dist > 0.4
+        if np.isnan(avg_dist):
+            return True # Treat structural errors as a fall
+            
+        return bool(avg_dist > 0.4)
