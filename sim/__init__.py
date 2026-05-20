@@ -222,9 +222,10 @@ class MujocoSimulator:
         if np.linalg.det(R_opt) < 0:
             Vt[-1] *= -1
             R_opt = Vt.T @ U.T
-        print(R_opt)
         t_opt = H.mean(axis=0) - R_opt @ R.mean(axis=0)
         self.set_orientation(R_opt,t_opt)
+        #now move the centre joint to centre of axis
+        self.data.qpos[0:2]=[0,0]
     def set_orientation(self, R_opt, t_opt):
         
         #self.data.eq_active[:] = 0 

@@ -34,6 +34,8 @@ class dataset:
         return pose,changed
     def current_landmarks(self):
         return self.X[self.i]
+    def skip(self):
+        self.i=self.ind_count
 class robo_gym(gym.Env):
     def __init__(self,path_to_scene="C:/Users/dexte/Documents/mujoco_menagerie-main/mujoco_menagerie-main/unitree_h1/scene.xml",
                  path_to_urdf="/its/home/drs25/unitree_ros/robots/h1_description/urdf/h1_with_hand.urdf"): #cannot remember how many joints
@@ -70,7 +72,6 @@ class robo_gym(gym.Env):
         np.save(self.filename,np.array(self.history))
     def step(self,correction):
         landmarks=None 
-        resetting=False
         while landmarks is None: #ensure that it actualyl has landmarks
             try:
                 while landmarks is None: #ensure that it actualyl has landmarks
@@ -78,12 +79,13 @@ class robo_gym(gym.Env):
                     landmarks,_=self.pose.to_local_space(landmarks)
                 landmarks=landmarks[:,:3] 
                 landmarks=self.sim.align_human_to_robot(landmarks)
-                if ind or resetting: #if start of video then reset the position
+                if ind: #if start of video then reset the position
                     self.sim.rotate_robot_to_human(landmarks)
+                    self.ki_mod.equalise_sims(self.sim)
             except LinAlgError:
+                self.dataset.skip()
                 landmarks=None 
                 self.sim.reset()
-                resetting=True
         self.landmarks=landmarks.copy()
         
         self.current_coords=[landmarks[14],landmarks[13],landmarks[28],landmarks[27]]
@@ -153,6 +155,12 @@ class robo_gym(gym.Env):
         obs = self._get_obs()
         if np.isnan(obs).any():
             print("CRITICAL ERROR: Initial observation contains NaN!")
+        if type(self.landmarks)!=type(None):
+            try:
+                self.sim.rotate_robot_to_human(self.landmarks)
+                self.ki_mod.equalise_sims(self.sim)
+            except:
+                self.dataset.skip()
         return self._get_obs(), {}
     def _check_fallen(self):
         # if too far away from points to really recover
@@ -168,4 +176,4 @@ class robo_gym(gym.Env):
         if np.isnan(avg_dist):
             return True # Treat structural errors as a fall
             
-        return bool(avg_dist > 0.4)
+        return bool(avg_dist > 0.6)

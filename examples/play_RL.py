@@ -12,7 +12,7 @@ vec_env = robo_gym(
     path_to_urdf="/home/dexter/Documents/GitHub/pose-to-biped/Robots/h1_with_hand.urdf"
 )
 vec_env.set_dataset("/home/dexter/Documents/GitHub/pose-to-biped/models/")
-model = PPO.load("/home/dexter/Documents/GitHub/pose-to-biped/models/test1", device="cpu")
+model = PPO.load("/home/dexter/Documents/GitHub/pose-to-biped/models/test2", device="cpu")
 
 obs,_ = vec_env.reset()
 with mujoco.viewer.launch_passive(vec_env.sim.model, vec_env.sim.data) as viewer: 
