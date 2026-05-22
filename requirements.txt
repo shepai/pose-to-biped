@@ -1,0 +1,8 @@
+mujoco
+opencv-python
+pin-pink
+osqp
+mediapipe==0.10.14
+matplotlib
+scipy
+stable-baselines3
