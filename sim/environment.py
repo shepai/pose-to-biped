@@ -14,23 +14,29 @@ class dataset:
         self.X=None 
         self.ind=None
         self.converted=False 
-        self.i=0
+        self.i=-1
         self.ind_count=0
+        self.inner_counter=0
     def open_converted(self,filepath):
         self.X=np.load(filepath+"/X.npy")
         self.ind=np.load(filepath+"/IND.npy")
         self.converted=True 
     def next_landmarks(self):
+        if self.inner_counter==0: #enforce being the same target for a few steps to give the robot a chance
+            self.i+=1
         changed=False
         if self.i==self.ind[self.ind_count]:
             self.ind_count+=1
             print("INDEX CHANGE")
-            changed=True
+            if self.inner_counter==0: changed=True
         if self.i>=len(self.X):
             self.i=0 
             self.ind_count=0
+            self.inner_counter=0
         pose=self.X[self.i]
-        self.i+=1
+        self.inner_counter+=1
+        if self.inner_counter==20:
+            self.inner_counter=0
         return pose,changed
     def current_landmarks(self):
         return self.X[self.i]
@@ -105,10 +111,10 @@ class robo_gym(gym.Env):
                 print("OSQP error")
                 self.ki_mod.equalise_sims(self.sim)
         #step through sim
-        for dic in self.theta_ref:
-            self.sim.map_move(dic,correction)
-            # Update MuJoCo kinematics
-            self.sim.set_step(1)     
+        
+        self.sim.map_move(self.theta_ref[-1],correction)
+        # Update MuJoCo kinematics
+        self.sim.set_step(5)     
         map=self.sim.get_coordinates()
         self.current_positions=[map["right_wrist"], map["left_wrist"], map["right_ankle"], map["left_ankle"]]
         reward = self._compute_reward()
