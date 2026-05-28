@@ -111,7 +111,6 @@ class robo_gym(gym.Env):
                 print("OSQP error")
                 self.ki_mod.equalise_sims(self.sim)
         #step through sim
-        
         self.sim.map_move(self.theta_ref[-1],correction)
         # Update MuJoCo kinematics
         self.sim.set_step(5)     
@@ -143,7 +142,7 @@ class robo_gym(gym.Env):
         obs=np.concatenate([
             np.asarray(self.sim.get_position()),        # joint angles
             self.sim.get_velocities(),  # velocities (placeholder)
-            np.zeros_like(self.current_joints),             # reference pose
+            self.current_joints,             # reference pose
             self.sim.get_imu()   ]).astype(np.float32)              # IMU placeholder
         if np.isnan(obs).any() or np.isinf(obs).any():
             print("Warning: NaN or Inf detected in observations! Cleaning up.")
