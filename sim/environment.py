@@ -56,19 +56,24 @@ class robo_gym(gym.Env):
             shape=(num_joints,),
             dtype=np.float32
         )
-        self.observation_space = gym.spaces.Box(
-            low=-1000.0, high=1000.0,
-            shape=(num_joints * 2 + num_joints + len(self.imu),),  # pos, vel, ref, IMU
-            dtype=np.float32
-        )
         self.current_coords=None
         self.current_positions=None 
-        self.current_joints=self.sim.get_position()
+        self.current_joints=None
         self.dataset=None 
-        self.landmarks=None
+        self.landmarks=np.zeros((133,3))
         self.history=[]
         self.filename=".log"
         self.iter=0
+        self.observation_space = gym.spaces.Box(
+            low=-1000.0, high=1000.0,
+            shape=(len(self.sim.get_velocities()) +
+                   len(self.sim.get_position()) +
+                   4*3 +
+                   len(self.sim.get_imu()),
+            ),  # pos, vel, ref, IMU
+            dtype=np.float32
+        )
+        
     def _set_log(self,filename):
         self.filename=filename
     def set_dataset(self,filepath):
@@ -111,7 +116,8 @@ class robo_gym(gym.Env):
                 print("OSQP error")
                 self.ki_mod.equalise_sims(self.sim)
         #step through sim
-        self.sim.map_move(self.theta_ref[-1],correction)
+        #self.sim.map_move(self.theta_ref[-1],correction)
+        self.sim.set_position(correction)
         # Update MuJoCo kinematics
         self.sim.set_step(5)     
         map=self.sim.get_coordinates()
@@ -139,10 +145,11 @@ class robo_gym(gym.Env):
         self.history.append(reward)
         return reward
     def _get_obs(self): 
+        landmarks=np.array([self.landmarks[14],self.landmarks[13],self.landmarks[28],self.landmarks[27]])
         obs=np.concatenate([
             np.asarray(self.sim.get_position()),        # joint angles
             self.sim.get_velocities(),  # velocities (placeholder)
-            self.current_joints,             # reference pose
+            landmarks.flatten(),             # reference pose
             self.sim.get_imu()   ]).astype(np.float32)              # IMU placeholder
         if np.isnan(obs).any() or np.isinf(obs).any():
             print("Warning: NaN or Inf detected in observations! Cleaning up.")
@@ -155,7 +162,7 @@ class robo_gym(gym.Env):
         #self.dataset.i = 0
         #self.dataset.ind_count = 0
         super().reset(seed=seed)
-        self.current_joints = np.zeros_like(self.action_space.sample())
+        self.current_joints = self.sim.get_position()
         self.theta_ref = np.zeros_like(self.current_joints)
         obs = self._get_obs()
         if np.isnan(obs).any():
@@ -169,9 +176,10 @@ class robo_gym(gym.Env):
         return self._get_obs(), {}
     def _check_fallen(self):
         # if too far away from points to really recover
-        landmarks=None 
+        landmarks = self.dataset.current_landmarks()
+        landmarks,_=self.pose.to_local_space(landmarks)
         while landmarks is None: #ensure that it actualyl has landmarks
-            landmarks,_=self.dataset.next_landmarks()
+            landmarks = self.dataset.next_landmarks()
             landmarks,_=self.pose.to_local_space(landmarks)
         landmarks=landmarks[:,:3] 
         landmarks=self.sim.align_human_to_robot(landmarks)[[11, 12, 23, 24, 28, 27]]

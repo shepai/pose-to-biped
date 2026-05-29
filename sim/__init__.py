@@ -136,7 +136,9 @@ class MujocoSimulator:
             "act": self.data.act.copy() if self.data.act is not None else None
         }
         return state
+
     def map_move(self, joint_dict, corrections=None, kp=200.0, kd=50.0):
+        
         self.data.ctrl[:] = 0.0
         j=0
         for name, target in joint_dict.items():
