@@ -17,6 +17,9 @@ class dataset:
         self.i=-1
         self.ind_count=0
         self.inner_counter=0
+        self.scale=1
+        self.H_mean=0
+        self.R_mean=0
     def open_converted(self,filepath):
         self.X=np.load(filepath+"/X.npy")
         self.ind=np.load(filepath+"/IND.npy")
@@ -25,15 +28,19 @@ class dataset:
         if self.inner_counter==0: #enforce being the same target for a few steps to give the robot a chance
             self.i+=1
         changed=False
-        if self.i==self.ind[self.ind_count]:
+        if self.i==self.ind[self.ind_count] or self.i==0:
             self.ind_count+=1
             print("INDEX CHANGE")
             if self.inner_counter==0: changed=True
-        if self.i>=len(self.X):
+        if self.i>=len(self.X): #reset if number too big
             self.i=0 
             self.ind_count=0
             self.inner_counter=0
-        pose=self.X[self.i]
+        pose=np.array([0])
+        c=0
+        while np.sum(pose)==0 and c+self.i<len(self.X): #make sure landmarks are valid
+            pose=self.X[self.i+c]
+            c+=1
         self.inner_counter+=1
         if self.inner_counter==20:
             self.inner_counter=0
@@ -42,6 +49,15 @@ class dataset:
         return self.X[self.i]
     def skip(self):
         self.i=self.ind_count
+    def align_landmarks(self,landmarks):
+        H_scaled = landmarks.astype(np.float64) * self.scale
+        # translate to robot centroid
+        aligned = H_scaled + (self.R_mean - self.H_mean * self.scale)
+        return aligned
+    def align(self,sim,landmarks):
+        print("ALIGN")
+        self.scale,self.H_mean,self.R_mean=sim.get_alignment_transformation(landmarks)
+        
 class robo_gym(gym.Env):
     def __init__(self,path_to_scene="C:/Users/dexte/Documents/mujoco_menagerie-main/mujoco_menagerie-main/unitree_h1/scene.xml",
                  path_to_urdf="/its/home/drs25/unitree_ros/robots/h1_description/urdf/h1_with_hand.urdf"): #cannot remember how many joints
@@ -89,18 +105,19 @@ class robo_gym(gym.Env):
                     landmarks,ind=self.dataset.next_landmarks()
                     landmarks,_=self.pose.to_local_space(landmarks)
                 landmarks=landmarks[:,:3] 
-                landmarks=self.sim.align_human_to_robot(landmarks)
                 if ind: #if start of video then reset the position
-                    self.sim.rotate_robot_to_human(landmarks)
-                    self.ki_mod.equalise_sims(self.sim)
+                    #self.ki_mod.equalise_sims(self.sim)
+                    self.dataset.align(self.sim,landmarks)
+                    landmarks_temp=self.sim.align_human_to_robot(landmarks)
+                    self.sim.rotate_robot_to_human(landmarks_temp)
             except LinAlgError:
                 self.dataset.skip()
                 landmarks=None 
                 self.sim.reset()
+        landmarks=self.dataset.align_landmarks(landmarks)
         self.landmarks=landmarks.copy()
-        
         self.current_coords=[landmarks[14],landmarks[13],landmarks[28],landmarks[27]]
-        trajectories=self.sim.get_trajectories(["right_wrist", "left_wrist", "right_ankle","left_ankle"],
+        """trajectories=self.sim.get_trajectories(["right_wrist", "left_wrist", "right_ankle","left_ankle"],
                                           [landmarks[14],landmarks[13],landmarks[28],landmarks[27]])
         while True:
             try:
@@ -114,10 +131,10 @@ class robo_gym(gym.Env):
                 break
             except osqp.interface.OSQPException: 
                 print("OSQP error")
-                self.ki_mod.equalise_sims(self.sim)
+                self.ki_mod.equalise_sims(self.sim)"""
         #step through sim
         #self.sim.map_move(self.theta_ref[-1],correction)
-        self.sim.set_position(correction)
+        self.sim.set_position(correction,kp=30, kd=5)
         # Update MuJoCo kinematics
         self.sim.set_step(5)     
         map=self.sim.get_coordinates()
@@ -189,4 +206,4 @@ class robo_gym(gym.Env):
         if np.isnan(avg_dist):
             return True # Treat structural errors as a fall
             
-        return bool(avg_dist > 0.6)
+        return bool(avg_dist > 0.4)

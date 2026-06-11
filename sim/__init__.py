@@ -201,6 +201,22 @@ class MujocoSimulator:
         # translate to robot centroid
         aligned = H_scaled + (R_mean - H_mean * scale)
         return aligned
+    def get_alignment_transformation(self, human_pose):
+        robot_coords = np.array(list(self.get_coordinates().values()))
+        H = human_pose[[11, 12, 23, 24, 28, 27]].astype(np.float64)
+        R = robot_coords[[13, 18, 6, 1, 5, 10]].astype(np.float64)
+        # center both
+        H_mean = H.mean(axis=0)
+        R_mean = R.mean(axis=0)
+        Hc = H - H_mean
+        Rc = R - R_mean
+        # SCALE ONLY (no rotation)
+        scale = np.sqrt(np.sum(Rc ** 2) / np.sum(Hc ** 2)+0.00001)
+        # apply scaling only
+        H_scaled = human_pose.astype(np.float64) * scale
+        # translate to robot centroid
+        aligned = H_scaled + (R_mean - H_mean * scale)
+        return scale,H_mean,R_mean
     def set_points(self, points):
         for i, p in enumerate(points):
             sid = self.model.site(f"p{i}").id
