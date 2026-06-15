@@ -34,12 +34,12 @@ model = PPO(
 )
 
 checkpoint_callback = CheckpointCallback(
-    save_freq=10000,          # save every 10k steps
+    save_freq=100000,          # save every 10k steps
     save_path="./logs/",
-    name_prefix="/home/dexter/Documents/GitHub/pose-to-biped/models/sac/test_PPO"
+    name_prefix="/home/dexter/Documents/GitHub/pose-to-biped/models/ppo/test_ppo"
 )
 model.learn(total_timesteps=5000000, callback=checkpoint_callback)
-model.save("/home/dexter/Documents/GitHub/pose-to-biped/models/sac/test_PPO")
+model.save("/home/dexter/Documents/GitHub/pose-to-biped/models/ppo/test_ppo")
 
 del model # remove to demonstrate saving and loading
 
