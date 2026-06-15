@@ -20,10 +20,14 @@ class dataset:
         self.scale=1
         self.H_mean=0
         self.R_mean=0
+        self.max=0
     def open_converted(self,filepath):
         self.X=np.load(filepath+"/X.npy")
         self.ind=np.load(filepath+"/IND.npy")
         self.converted=True 
+        self.max=len(self.X)
+    def set_max_sample(self,num):
+        self.max=num
     def next_landmarks(self):
         if self.inner_counter==0: #enforce being the same target for a few steps to give the robot a chance
             self.i+=1
@@ -32,13 +36,13 @@ class dataset:
             self.ind_count+=1
             print("INDEX CHANGE")
             if self.inner_counter==0: changed=True
-        if self.i>=len(self.X): #reset if number too big
+        if self.i>=self.max: #reset if number too big
             self.i=0 
             self.ind_count=0
             self.inner_counter=0
         pose=np.array([0])
         c=0
-        while np.sum(pose)==0 and c+self.i<len(self.X): #make sure landmarks are valid
+        while np.sum(pose)==0 and c+self.i<self.max: #make sure landmarks are valid
             pose=self.X[self.i+c]
             c+=1
         self.inner_counter+=1
@@ -95,6 +99,7 @@ class robo_gym(gym.Env):
     def set_dataset(self,filepath):
         self.dataset=dataset()
         self.dataset.open_converted(filepath)
+        self.dataset.max=20000
     def save(self):
         np.save(self.filename,np.array(self.history))
     def step(self,correction):
@@ -134,9 +139,10 @@ class robo_gym(gym.Env):
                 self.ki_mod.equalise_sims(self.sim)"""
         #step through sim
         #self.sim.map_move(self.theta_ref[-1],correction)
-        self.sim.set_position(correction,kp=30, kd=5)
+        correction=np.clip(correction,-1,1)
+        self.sim.set_position(correction,kp=40, kd=10)
         # Update MuJoCo kinematics
-        self.sim.set_step(5)     
+        self.sim.set_step(2)     
         map=self.sim.get_coordinates()
         self.current_positions=[map["right_wrist"], map["left_wrist"], map["right_ankle"], map["left_ankle"]]
         reward = self._compute_reward()
@@ -152,10 +158,11 @@ class robo_gym(gym.Env):
         robot=np.array(list(self.sim.get_coordinates().values()))[[13, 18, 6, 1, 5, 10]]
         distances = np.linalg.norm(landmarks - robot, axis=1)
         avg_dist = np.mean(distances)
-        tracking = -avg_dist
-        fallen = self._check_fallen()
-        stability = -10.0 if fallen else 0.5
-        reward=float(tracking + stability)
+        tracking = -0.5 * avg_dist
+        fallen = 1 if self._check_fallen() else 0
+        stability = 1.0 * (1.0 - fallen)
+        #velocity_penalty = -0.01 * robot_velocity
+        reward = tracking + stability #+ velocity_penalty
         if np.isnan(reward): 
             print("WARNING REWARD IS NAN")
             reward=-100
@@ -163,11 +170,16 @@ class robo_gym(gym.Env):
         return reward
     def _get_obs(self): 
         landmarks=np.array([self.landmarks[14],self.landmarks[13],self.landmarks[28],self.landmarks[27]])
+        try:
+            imu=self.sim.get_imu()
+        except RecursionError:
+            imu=np.array([0,0,0])
+            self.dataset.next_landmarks()
         obs=np.concatenate([
             np.asarray(self.sim.get_position()),        # joint angles
             self.sim.get_velocities(),  # velocities (placeholder)
             landmarks.flatten(),             # reference pose
-            self.sim.get_imu()   ]).astype(np.float32)              # IMU placeholder
+            imu   ]).astype(np.float32)              # IMU placeholder
         if np.isnan(obs).any() or np.isinf(obs).any():
             print("Warning: NaN or Inf detected in observations! Cleaning up.")
             obs = np.nan_to_num(obs, nan=0.0, posinf=1.0, neginf=-1.0)

@@ -39,6 +39,7 @@ class MujocoSimulator:
         if not self.gravity:
             self.model.opt.gravity[:] = [0, 0, 0]
     def set_position(self, target_qpos, kp=200.0, kd=50.0):
+        target_qpos=self.get_position() + 0.2*target_qpos
         joint_qpos_start = self.model.nq - self.model.nu
         joint_qvel_start = self.model.nv - self.model.nu
 
