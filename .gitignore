@@ -1,2 +1,3 @@
 *.pyc
 /pose/yoga-pose-videos-dataset/Yoga_Vid_Collected
+/src/G1_pose_to_biped.egg-info

@@ -3,7 +3,7 @@ requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "G1 pose to biped"
+name = "G1-pose-to-biped"
 version = "0.1.0"
 description = "G1 control and body copying"
 readme = "README.md"
