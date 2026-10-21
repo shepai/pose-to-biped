@@ -12,7 +12,7 @@ Keys (click the viewer window first):
 """
 import argparse
 import time
-
+from pathlib import Path
 import glfw
 import gymnasium as gym
 import numpy as np
@@ -34,8 +34,11 @@ KEYS = {
 
 
 def main():
+    import G1_tele.policies as policies
+    DEFAULT_POLICY = Path(policies.__file__).resolve().parent / "motion.pt"
     ap = argparse.ArgumentParser()
-    ap.add_argument("--policy", required=True, help="TorchScript locomotion policy (e.g. motion.pt)")
+    ap.add_argument("--policy", default=str(DEFAULT_POLICY),
+                help="TorchScript locomotion policy (default: the packaged g1.pt)")
     args = ap.parse_args()
 
     cmd = np.zeros(3, np.float32)                     # [vx, vy, yaw_rate]

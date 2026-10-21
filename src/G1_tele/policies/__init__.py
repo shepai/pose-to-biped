@@ -21,7 +21,7 @@ import glfw
 import numpy as np
 import torch
 
-from G1_tele import G1Env, LEG_SLICE
+from G1_tele.envs.walker import G1Env, LEG_SLICE
 
 # ---- values the pretrained policy was trained with (unitree_rl_gym g1.yaml) ----
 CMD_SCALE = np.array([2.0, 2.0, 0.25], np.float32)
