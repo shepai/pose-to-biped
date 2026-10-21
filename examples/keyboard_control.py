@@ -1,8 +1,7 @@
 """
-Drive the G1 with the keyboard using the pretrained policy through the gym env.
+Drive the G1 with the arrow keys (examples/keyboard_control.py).
 
-    python keyboard_control.py                 # uses g1.yaml and the policy_path inside it
-    python keyboard_control.py --config g1.yaml --policy path/to/motion.pt
+    python keyboard_control.py --policy path/to/motion.pt
 
 Keys (click the viewer window first):
     UP / DOWN       forward / backward      (+/- 0.2 m/s per press)
@@ -15,9 +14,14 @@ import argparse
 import time
 
 import glfw
+import gymnasium as gym
 import numpy as np
 
-from g1_loco_env import G1LocoEnv, TorchScriptPolicy
+import G1_tele                                        # noqa: F401  (registers "G1-walker")
+from G1_tele.envs.walker import LEG_SLICE
+from G1_tele.policies import TorchScriptPolicy, build_policy_obs
+
+N_POLICY_ACTIONS = 12                                 # the pretrained policy drives the 12 leg joints
 
 CMD_STEP = np.array([0.2, 0.2, 0.3], np.float32)
 CMD_MIN = np.array([-0.6, -0.4, -1.0], np.float32)
@@ -31,46 +35,52 @@ KEYS = {
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--config", default="g1.yaml")
-    ap.add_argument("--policy", default=None, help="override the policy path from the yaml")
+    ap.add_argument("--policy", required=True, help="TorchScript locomotion policy (e.g. motion.pt)")
     args = ap.parse_args()
 
+    cmd = np.zeros(3, np.float32)                     # [vx, vy, yaw_rate]
     flags = {"reset": False}
-    env_ref = {}
 
     def key_cb(keycode):
-        env = env_ref.get("env")
-        if env is None:
-            return
         if keycode in KEYS:
-            env.cmd[:] = np.clip(env.cmd + CMD_STEP * np.array(KEYS[keycode], np.float32), CMD_MIN, CMD_MAX)
+            cmd[:] = np.clip(cmd + CMD_STEP * np.array(KEYS[keycode], np.float32), CMD_MIN, CMD_MAX)
         elif keycode == glfw.KEY_SPACE:
-            env.cmd[:] = 0
+            cmd[:] = 0
         elif keycode == glfw.KEY_BACKSPACE:
             flags["reset"] = True
         else:
             return
-        print(f"cmd: vx={env.cmd[0]:+.2f}  vy={env.cmd[1]:+.2f}  yaw={env.cmd[2]:+.2f}")
+        print(f"cmd: vx={cmd[0]:+.2f}  vy={cmd[1]:+.2f}  yaw={cmd[2]:+.2f}")
 
-    env = G1LocoEnv(args.config, render_mode="human", key_callback=key_cb, max_episode_seconds=1e9)
-    env_ref["env"] = env
-    policy = TorchScriptPolicy(args.policy or env.policy_path)
+    policy = TorchScriptPolicy(args.policy)
+    env = gym.make("G1-walker", render_mode="human", key_callback=key_cb, max_episode_seconds=1e9)
+    base = env.unwrapped                              # raw env: state(), dt, n_joints, viewer_is_running()
 
-    obs, _ = env.reset()
+    env.reset()
     policy.reset()
-    env.render()                                   # opens the viewer
+    last_a = np.zeros(N_POLICY_ACTIONS, np.float32)
+    action = np.zeros(base.n_joints, np.float32)
+    env.render()                                      # opens the viewer
 
-    while env.viewer_is_running():
-        t0 = time.time()
-        obs, reward, terminated, truncated, info = env.step(policy(obs))
-        env.render()
-        if terminated or truncated or flags["reset"]:
-            print("Episode ended - resetting" + (" (fell)" if terminated else ""))
-            obs, _ = env.reset()
-            policy.reset()
-            flags["reset"] = False
-        time.sleep(max(0.0, env.dt - (time.time() - t0)))
-    env.close()
+    try:
+        while base.viewer_is_running():
+            t0 = time.time()
+            last_a = policy(build_policy_obs(base, cmd, last_a))
+            action[:] = 0.0
+            action[LEG_SLICE] = last_a                # legs from the policy, the rest held at default
+            _, _, terminated, truncated, _ = env.step(action)
+            env.render()
+
+            if terminated or truncated or flags["reset"]:
+                print("Resetting" + (" (robot fell)" if terminated else ""))
+                env.reset()
+                policy.reset()
+                last_a[:] = 0
+                cmd[:] = 0
+                flags["reset"] = False
+            time.sleep(max(0.0, base.dt - (time.time() - t0)))
+    finally:
+        env.close()
 
 
 if __name__ == "__main__":

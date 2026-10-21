@@ -17,8 +17,6 @@ dependencies = [
     "opencv-python>=4.10",
     "mujoco",
     "gymnasium",
-    "dm_control"
-
 ]
 
 [tool.setuptools]

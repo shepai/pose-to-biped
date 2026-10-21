@@ -23,7 +23,7 @@ import mujoco.viewer
 import gymnasium as gym
 from gymnasium import spaces
 
-XML_PATH = Path(__file__).resolve().parent / "assets" / "g1_29dof_with_hand.xml"
+XML_PATH = Path(__file__).resolve().parent / "assets" / "scene.xml"
 
 LEG = [f"{s}_{j}_joint" for s in ("left", "right")
        for j in ("hip_pitch", "hip_roll", "hip_yaw", "knee", "ankle_pitch", "ankle_roll")]
