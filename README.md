@@ -13,6 +13,8 @@ pip install "mediapipe==0.10.14"
 pip install matplotlib
 pip install scipy
 pip install stable-baselines3
+pip install tqdm
+pip install rich
 ```
 Be aware that pin-pink works better on Linux, we have not been able to get this running on Windows. This library is needed kinemtics work. 
 
