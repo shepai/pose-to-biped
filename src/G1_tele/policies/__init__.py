@@ -41,12 +41,18 @@ KEYS = {
 class TorchScriptPolicy:
     def __init__(self, path):
         self.net = torch.jit.load(str(path), map_location="cpu").eval()
+        self._threads_set = False
 
     def reset(self):
         if hasattr(self.net, "reset_memory"):          # recurrent (LSTM) exports
             self.net.reset_memory()
 
     def __call__(self, obs):
+        if not self._threads_set:
+            # A tiny LSTM gains nothing from multithreading, and with 16 SubprocVecEnv workers each
+            # spawning one torch thread per core, the CPU thrashes (your log showed ~136 steps/s).
+            torch.set_num_threads(1)
+            self._threads_set = True
         with torch.no_grad():
             return self.net(torch.from_numpy(obs).unsqueeze(0)).squeeze(0).numpy()
 

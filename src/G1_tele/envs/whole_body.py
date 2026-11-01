@@ -1,8 +1,8 @@
 """
-Policy-agnostic Gymnasium environment for the Unitree G1 (29 DoF + hands) in MuJoCo.
+Policy-agnostic Gymnasium environment for the Unitree G1 (29 DoF, optional hands) in MuJoCo.
 
-The model is loaded from   G1_tele/assets/g1_description/scene_fullbody.xml (override with xml_path=)
-No yaml, no policy loading here - that lives in whatever script drives the env.
+The model is loaded from   G1_tele/assets/g1_description/g1_29dof.xml   (override with xml_path=)
+The xml must contain a floor (unitree_rl_gym's g1_29dof.xml does).
 
 Joint order of the 29 controlled body joints (used for `action`, `state()["q"]`, ...):
     0-11   legs   (L hip_pitch, hip_roll, hip_yaw, knee, ankle_pitch, ankle_roll, then R)
@@ -12,8 +12,17 @@ Joint order of the 29 controlled body joints (used for `action`, `state()["q"]`,
 Hand (finger) joints are not part of the action; they are PD-held at 0.
 
 action : 29 values, target joint position = default_q + action_scale * action
+         (or call step_targets(q_target) to give absolute PD targets directly)
 obs    : [ang_vel*0.25 (3), gravity (3), (q-default)(29), dq*0.05 (29), last_action (29)] = 93
 reward : 0.0 (put your task reward in a wrapper); terminated when the robot falls over.
+
+Joint armature (motor rotor inertia)
+------------------------------------
+unitree_rl_gym's g1_29dof.xml ships with armature = 0 on every joint, while the 12-DoF model the
+pretrained walking policy was trained on has armature = 0.01. With zero armature the PD loop on the
+light links behaves very differently and that policy falls over within ~1.5 s, even with the arms
+perfectly still. armature="auto" (default) fills in realistic per-motor values whenever the xml
+has none; pass a float to force a uniform value, or None to leave the xml untouched.
 """
 from pathlib import Path
 
@@ -33,6 +42,7 @@ ARM = [f"{s}_{j}_joint" for s in ("left", "right")
                  "wrist_roll", "wrist_pitch", "wrist_yaw")]
 BODY_JOINTS = LEG + WAIST + ARM          # 29
 LEG_SLICE, WAIST_SLICE, ARM_SLICE = slice(0, 12), slice(12, 15), slice(15, 29)
+WRIST_IDX = [19, 20, 21, 26, 27, 28]
 
 _arm_default = lambda sgn: [0.0, 0.15 * sgn, 0.0, 0.3, 0.0, 0.0, 0.0]
 DEFAULT_Q = np.array([-0.1, 0, 0, 0.3, -0.2, 0] * 2 + [0, 0, 0]
@@ -46,13 +56,19 @@ TAU_LIM = np.array([88, 139, 88, 139, 50, 50] * 2 + [88, 50, 50]
                    + [25, 25, 25, 25, 25, 5, 5] * 2, np.float32)
 HAND_KP, HAND_KD, HAND_TAU = 3.0, 0.2, 3.0
 
+# Reflected rotor inertia of the G1 motors (kg m^2): 7520-14, 7520-22, 5020 (x2 for the
+# parallel-linkage ankles / waist roll+pitch) and 4010 for the small wrist motors.
+_A14, _A22, _A50, _A40 = 0.010177520, 0.025101925, 0.003609725, 0.00425
+ARMATURE = np.array([_A14, _A22, _A14, _A22, 2 * _A50, 2 * _A50] * 2 + [_A14, 2 * _A50, 2 * _A50]
+                    + [_A50, _A50, _A50, _A50, _A50, _A40, _A40] * 2, np.float32)
+
 
 class G1Env(gym.Env):
     metadata = {"render_modes": ["human"], "render_fps": 50}
 
     def __init__(self, xml_path=XML_PATH, render_mode=None, key_callback=None,
                  sim_dt=0.002, decimation=10, action_scale=0.25,
-                 max_episode_seconds=20.0, fall_height=0.5, fall_tilt=-0.6):
+                 max_episode_seconds=20.0, fall_height=0.5, fall_tilt=-0.6, armature="auto"):
         super().__init__()
         self.m = mujoco.MjModel.from_xml_path(str(xml_path))
         self.m.opt.timestep = sim_dt
@@ -71,6 +87,8 @@ class G1Env(gym.Env):
         self.v_adr = np.array([j(n).dofadr[0] for n in BODY_JOINTS])
         act_for = {int(self.m.actuator_trnid[i, 0]): i for i in range(self.m.nu)}
         self.act_adr = np.array([act_for[j(n).id] for n in BODY_JOINTS])
+        self.q_lo = np.array([j(n).range[0] for n in BODY_JOINTS], np.float32)
+        self.q_hi = np.array([j(n).range[1] for n in BODY_JOINTS], np.float32)
 
         # every other actuated joint (fingers) is held at 0
         body_ids = {j(n).id for n in BODY_JOINTS}
@@ -79,7 +97,20 @@ class G1Env(gym.Env):
         self.hand_v = np.array([self.m.jnt_dofadr[jid] for jid, _ in hand], int)
         self.hand_act = np.array([a for _, a in hand], int)
 
+        if armature is not None:
+            arm = self.m.dof_armature
+            if isinstance(armature, str):                 # "auto": only fill in if the xml has none
+                if np.all(arm[self.v_adr] == 0):
+                    arm[self.v_adr] = ARMATURE
+            else:
+                arm[self.v_adr] = armature
+
+        if not any(self.m.geom_type[g] == mujoco.mjtGeom.mjGEOM_PLANE for g in range(self.m.ngeom)):
+            raise ValueError(f"{xml_path} has no floor plane. Use a scene xml that includes the robot "
+                             "and a <geom type='plane'/> floor (unitree_rl_gym's g1_29dof.xml has one).")
+
         self.default_q = DEFAULT_Q.copy()
+        self.kp, self.kd, self.tau_lim = KP.copy(), KD.copy(), TAU_LIM.copy()
         self.observation_space = spaces.Box(-np.inf, np.inf, (6 + 3 * self.n_joints,), np.float32)
         self.action_space = spaces.Box(-10.0, 10.0, (self.n_joints,), np.float32)
 
@@ -108,10 +139,11 @@ class G1Env(gym.Env):
     def state(self):
         """Raw (unscaled) state, for building policy-specific observations."""
         d = self.d
+        R = self._rot()
         return {
             "ang_vel": d.qvel[3:6].astype(np.float32),                    # body frame
-            "gravity": (self._rot().T @ np.array([0, 0, -1.0])).astype(np.float32),
-            "lin_vel": (self._rot().T @ d.qvel[0:3]).astype(np.float32),  # body frame
+            "gravity": (R.T @ np.array([0, 0, -1.0])).astype(np.float32),
+            "lin_vel": (R.T @ d.qvel[0:3]).astype(np.float32),            # body frame
             "q": d.qpos[self.q_adr].astype(np.float32),
             "dq": d.qvel[self.v_adr].astype(np.float32),
             "base_pos": d.qpos[0:3].astype(np.float32),
@@ -136,19 +168,28 @@ class G1Env(gym.Env):
         self.last_action[:] = 0
         return self._obs(), {}
 
-    def step(self, action):
-        action = np.clip(np.asarray(action, np.float32), -10, 10)
-        target = self.default_q + self.action_scale * action
+    def step_targets(self, target_q, pre_substep=None):
+        """Advance one control step (decimation physics steps) with absolute PD joint targets.
+        pre_substep(data), if given, is called before every physics step (e.g. to apply forces)."""
+        d, m = self.d, self.m
+        kp, kd, lim = self.kp, self.kd, self.tau_lim
+        qa, va, aa = self.q_adr, self.v_adr, self.act_adr
+        has_hand = len(self.hand_act) > 0
         for _ in range(self.decim):
-            d = self.d
-            tau = KP * (target - d.qpos[self.q_adr]) - KD * d.qvel[self.v_adr]
-            d.ctrl[self.act_adr] = np.clip(tau, -TAU_LIM, TAU_LIM)
-            if len(self.hand_act):
+            tau = kp * (target_q - d.qpos[qa]) - kd * d.qvel[va]
+            d.ctrl[aa] = np.clip(tau, -lim, lim)
+            if has_hand:
                 th = -HAND_KP * d.qpos[self.hand_q] - HAND_KD * d.qvel[self.hand_v]
                 d.ctrl[self.hand_act] = np.clip(th, -HAND_TAU, HAND_TAU)
-            mujoco.mj_step(self.m, d)
-            self.sim_steps += 1
+            if pre_substep is not None:
+                pre_substep(d)
+            mujoco.mj_step(m, d)
+        self.sim_steps += self.decim
         self.steps += 1
+
+    def step(self, action):
+        action = np.clip(np.asarray(action, np.float32), -10, 10)
+        self.step_targets(self.default_q + self.action_scale * action)
         self.last_action = action
 
         s = self.state()

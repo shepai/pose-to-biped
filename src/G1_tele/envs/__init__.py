@@ -10,3 +10,8 @@ register(
     id="G1-hand-tracking",
     entry_point="G1_tele.envs.hand_tracking:HandTrackingEnv",     # generic: pass kwargs at make()
 )
+
+register(
+    id="G1-pose-tracking",
+    entry_point="G1_tele.envs.pose_tracking:PoseTrackingEnv",     # whole-body keypoint tracking
+)
