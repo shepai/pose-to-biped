@@ -4,8 +4,9 @@ examples/run_logging.py  -  everything a training run writes, all under logs/<ru
     logs/<run>/
         config.json                          env id + kwargs, PPO settings, intervals, start time
         progress.csv                         SB3 training log + track/* and eval/* columns
-        eval.csv                             one row per evaluation (every video_every_pct %)
-        videos/<run>_005pct_3.0M.mp4         deterministic policy, target spheres drawn
+        eval.csv                             one row per evaluation: survival + errors, overall and per kind
+        curriculum.json                      which motion kinds are unlocked, sampling weights
+        videos/<run>_005pct_3.0M.mp4         deterministic policy, one segment per motion kind
         checkpoints/<run>_010pct_6.0M.zip    + <same name>_vecnormalize.pkl
         <run>.zip, <run>_vecnormalize.pkl    final model (also written on Ctrl-C)
         events.out.tfevents.*                if tensorboard is installed
@@ -78,15 +79,19 @@ def write_video(frames, path, fps):
 
 # ------------------------------------------------------------------ callbacks
 class TrackingStatsCallback(BaseCallback):
-    """Per-rollout tracking metrics (track/* columns) - cleaner than the episode return."""
+    """Per-rollout metrics (track/* columns) - cleaner than the episode return.
+    track/end_fell and track/end_lost split early episode ends into falls and lost tracking."""
+
+    KEYS = {"kp": "kp_err", "hand": "hand_err", "foot": "foot_err", "assist": "assist", "cp": "cp_margin",
+            "contact": "contact_match", "r_bal": "r_balance", "r_trk": "r_track"}
 
     def __init__(self, dt=0.02):
         super().__init__()
         self.dt = dt
 
     def _on_rollout_start(self):
-        self.buf = {"kp": [], "hand": [], "foot": [], "rew": [], "assist": []}
-        self.ep_len, self.falls, self.eps = [], 0, 0
+        self.buf = {k: [] for k in list(self.KEYS) + ["rew"]}
+        self.ep_len, self.fell, self.lost, self.eps = [], 0, 0, 0
 
     def _on_step(self):
         infos, dones = self.locals["infos"], self.locals["dones"]
@@ -94,27 +99,108 @@ class TrackingStatsCallback(BaseCallback):
         raw = env.get_original_reward() if hasattr(env, "get_original_reward") else self.locals["rewards"]
         self.buf["rew"].append(float(np.mean(raw)))
         for info, done in zip(infos, dones):
-            self.buf["kp"].append(info.get("kp_err", np.nan))
-            self.buf["hand"].append(info.get("hand_err", np.nan))
-            self.buf["foot"].append(info.get("foot_err", np.nan))
-            self.buf["assist"].append(info.get("assist", 0.0))
+            for k, key in self.KEYS.items():
+                self.buf[k].append(info.get(key, np.nan))
             if done:
                 self.eps += 1
-                self.falls += int(info.get("fell", False) or info.get("lost", False))
+                self.fell += int(bool(info.get("fell", False)))
+                self.lost += int(bool(info.get("lost", False)) and not info.get("fell", False))
                 if "episode" in info:
                     self.ep_len.append(info["episode"]["l"])
         return True
 
     def _on_rollout_end(self):
-        self.logger.record("track/kp_err_cm", 100 * np.nanmean(self.buf["kp"]))
-        self.logger.record("track/hand_err_cm", 100 * np.nanmean(self.buf["hand"]))
-        self.logger.record("track/foot_err_cm", 100 * np.nanmean(self.buf["foot"]))
-        self.logger.record("track/reward_per_step", float(np.mean(self.buf["rew"])))
-        self.logger.record("track/assist", float(np.mean(self.buf["assist"])))
+        m = lambda k: float(np.nanmean(self.buf[k])) if len(self.buf[k]) else np.nan
+        rec = self.logger.record
+        rec("track/kp_err_cm", 100 * m("kp"))
+        rec("track/hand_err_cm", 100 * m("hand"))
+        rec("track/foot_err_cm", 100 * m("foot"))
+        rec("track/reward_per_step", m("rew"))
+        rec("track/reward_balance", m("r_bal"))
+        rec("track/reward_tracking", m("r_trk"))
+        rec("track/cp_margin_cm", 100 * m("cp"))
+        rec("track/contact_match", m("contact"))
+        rec("track/assist", m("assist"))
         if self.eps:
-            self.logger.record("track/fall_rate", self.falls / self.eps)
+            rec("track/fall_rate", (self.fell + self.lost) / self.eps)
+            rec("track/end_fell", self.fell / self.eps)
+            rec("track/end_lost", self.lost / self.eps)
         if self.ep_len:
-            self.logger.record("track/ep_len_s", float(np.mean(self.ep_len)) * self.dt)
+            rec("track/ep_len_s", float(np.mean(self.ep_len)) * self.dt)
+
+
+class CurriculumCallback(BaseCallback):
+    """Unlocks harder motion kinds only once the robot keeps its balance on the easier ones.
+
+    order      kinds from easiest to hardest; kinds not listed (e.g. your own "keypoints") are always on
+    start      how many kinds of `order` are unlocked at the start (2 = upper + whole body, feet planted)
+    threshold  unlock the next kind when every unlocked kind has mean survival >= threshold
+               (survival = fraction of the possible episode the robot stayed up and on track)
+    Unlocked kinds are sampled with weight floor + (1 - survival): more practice where it still
+    falls, but easy kinds never disappear (so they are not forgotten). State is saved to
+    <log_dir>/curriculum.json; stage 2 starts from stage 1's file."""
+
+    def __init__(self, log_dir, order=("upper", "whole", "balance", "step"), start=2, threshold=0.8,
+                 window=400, min_episodes=200, floor=0.3, state_from=None, verbose=1):
+        super().__init__(verbose)
+        self.order, self.start_level, self.threshold = list(order), start, threshold
+        self.window, self.min_eps, self.floor = window, min_episodes, floor
+        self.path = os.path.join(log_dir, "curriculum.json")
+        self.state_from = state_from
+
+    def _on_training_start(self):
+        kinds = list(self.training_env.get_attr("clip_kinds", indices=[0])[0])
+        self.ladder = [k for k in self.order if k in kinds]
+        self.always = [k for k in kinds if k not in self.order]
+        self.level = min(self.start_level, len(self.ladder))
+        if self.state_from and os.path.exists(self.state_from):
+            with open(self.state_from) as f:
+                self.level = max(self.level, int(json.load(f).get("level", 0)))
+        self.hist = {k: [] for k in kinds}
+        self._push_weights(announce=True)
+
+    def unlocked(self):
+        return self.always + self.ladder[:self.level]
+
+    def _survival(self, k):
+        h = self.hist[k]
+        return float(np.mean(h)) if len(h) >= self.min_eps else None
+
+    def _push_weights(self, announce=False):
+        w = {}
+        for k in self.unlocked():
+            s = self._survival(k)
+            w[k] = self.floor + (1.0 - (s if s is not None else 0.0))
+        self.weights = w
+        self.training_env.env_method("set_kind_weights", w)
+        with open(self.path, "w") as f:
+            json.dump({"level": self.level, "unlocked": self.unlocked(), "weights": w,
+                       "timesteps": int(self.model.num_timesteps)}, f, indent=2)
+        if announce and self.verbose:
+            print(f"[curriculum] training on: {', '.join(self.unlocked())}")
+
+    def _on_step(self):
+        for info, done in zip(self.locals["infos"], self.locals["dones"]):
+            if done and "clip_kind" in info and info["clip_kind"] in self.hist:
+                h = self.hist[info["clip_kind"]]
+                h.append(float(info["survival"]))
+                if len(h) > self.window:
+                    del h[0]
+        return True
+
+    def _on_rollout_end(self):
+        surv = [self._survival(k) for k in self.unlocked()]
+        if self.level < len(self.ladder) and all(s is not None and s >= self.threshold for s in surv):
+            self.level += 1
+            if self.verbose:
+                print(f"[curriculum] unlocked '{self.ladder[self.level - 1]}' at {self.model.num_timesteps:,} steps")
+        self._push_weights()
+        self.logger.record("curriculum/level", self.level)
+        for k in self.hist:
+            s = self._survival(k)
+            if s is not None:
+                self.logger.record(f"curriculum/survival_{k}", s)
+            self.logger.record(f"curriculum/weight_{k}", self.weights.get(k, 0.0))
 
 
 class _PercentCallback(BaseCallback):
@@ -167,21 +253,19 @@ class PeriodicCheckpointCallback(_PercentCallback):
 
 
 class PeriodicVideoEvalCallback(_PercentCallback):
-    """Every `every_pct` % (and at 0 %): run the deterministic policy on a fixed set of episodes in a
-    separate, unassisted env; film the first `video_seconds`; write the video, a row in eval.csv and
-    eval/* columns in progress.csv. Rendering problems never stop training - they are reported once
-    and videos are skipped, the evaluation numbers are still logged."""
+    """Every `every_pct` % (and at 0 %): run the deterministic policy on the same fixed episodes
+    (episodes_per_kind for every clip kind) in a separate, unassisted env. The video shows the first
+    `video_seconds_per_kind` of one episode per kind, back to back. Results go to eval.csv (overall
+    and per kind) and to eval/* columns in progress.csv. Rendering problems never stop training -
+    they are reported once and videos are skipped; the evaluation numbers are still logged."""
 
-    FIELDS = ["pct", "timesteps", "wall_minutes", "episodes", "ep_len_s", "survived_full_frac",
-              "kp_err_cm", "hand_err_cm", "foot_err_cm", "video"]
-
-    def __init__(self, env_id, total_timesteps, log_dir, run_name, every_pct=5, video_seconds=8.0,
-                 eval_episodes=5, max_episode_seconds=10.0, env_kwargs=None, width=640, height=480,
+    def __init__(self, env_id, total_timesteps, log_dir, run_name, every_pct=5, video_seconds_per_kind=4.0,
+                 episodes_per_kind=2, max_episode_seconds=10.0, env_kwargs=None, width=640, height=480,
                  distance=2.6, azimuth=135.0, elevation=-15.0):
         super().__init__(total_timesteps, every_pct, at_start=True)
         self.env_id, self.env_kwargs = env_id, dict(env_kwargs or {})
         self.log_dir, self.run = log_dir, run_name
-        self.video_seconds, self.eval_episodes, self.max_ep_s = video_seconds, eval_episodes, max_episode_seconds
+        self.video_s, self.per_kind, self.max_ep_s = video_seconds_per_kind, episodes_per_kind, max_episode_seconds
         self.size, self.cam_cfg = (width, height), (distance, azimuth, elevation)
         self.env = self.renderer = None
         self.render_ok = True
@@ -193,6 +277,18 @@ class PeriodicVideoEvalCallback(_PercentCallback):
         if self.env is not None:
             return
         self.env = gym.make(self.env_id, **self.env_kwargs).unwrapped
+        lib = self.env.lib
+        rng = np.random.default_rng(1234)
+        self.kinds = list(self.env.clip_kinds)
+        self.episodes = []                                       # fixed (kind, clip, t0) list
+        for k in self.kinds:
+            clips = [c for c in range(lib.n_clips) if str(lib.kinds[c]) == k and lib.duration(c) >= 2.0]
+            for c in [clips[int(i)] for i in np.linspace(0, len(clips) - 1, self.per_kind)] if clips else []:
+                t0 = float(rng.uniform(0, max(0.0, lib.duration(c) - self.max_ep_s)))
+                self.episodes.append((k, c, t0))
+        self.fields = (["pct", "timesteps", "wall_minutes", "survival", "ep_len_s", "kp_err_cm", "hand_err_cm",
+                        "foot_err_cm"] + [f"survival_{k}" for k in self.kinds]
+                       + [f"kp_err_cm_{k}" for k in self.kinds] + ["video"])
         if not self.render_ok:
             return
         try:
@@ -211,56 +307,70 @@ class PeriodicVideoEvalCallback(_PercentCallback):
             print(f"[video] rendering unavailable ({e}); evaluations continue without videos. "
                   "On a headless machine try MUJOCO_GL=egl (or osmesa).")
 
+    def _frame(self, frames):
+        try:
+            self.renderer.update_scene(self.env.data, camera=self.cam)
+            self.env.draw_targets(self.renderer.scene)
+            frames.append(self.renderer.render().copy())
+        except Exception as e:                                   # noqa: BLE001
+            print(f"[video] render failed ({e}); disabling videos")
+            self.renderer, self.render_ok = None, False
+
     # ---------- one evaluation
     def _fire(self, pct):
         self._setup()
         env, model = self.env, self.model
         vn = model.get_vec_normalize_env()
-        n_video = int(self.video_seconds / env.dt)
+        n_video = int(self.video_s / env.dt)
         max_steps = int(self.max_ep_s / env.dt)
-        frames, lens, full, kp, hand, foot = [], [], 0, [], [], []
-        for ep in range(self.eval_episodes):
-            obs, _ = env.reset(seed=10_000 + ep)                 # same episodes every time -> comparable
+        frames, filmed = [], set()
+        res = {k: {"surv": [], "len": [], "kp": [], "hand": [], "foot": []} for k in self.kinds}
+        for i, (kind, clip, t0) in enumerate(self.episodes):
+            obs, _ = env.reset(seed=10_000 + i, options={"clip": clip, "t0": t0})
+            film = kind not in filmed and self.renderer is not None
+            filmed.add(kind)
+            r = res[kind]
             for k in range(max_steps):
                 o = vn.normalize_obs(obs) if vn is not None else obs
                 action, _ = model.predict(o, deterministic=True)
                 obs, _, term, trunc, info = env.step(action)
-                kp.append(info["kp_err"]); hand.append(info["hand_err"]); foot.append(info["foot_err"])
-                if self.renderer is not None and len(frames) < n_video:
-                    try:
-                        self.renderer.update_scene(env.data, camera=self.cam)
-                        env.draw_targets(self.renderer.scene)
-                        frames.append(self.renderer.render().copy())
-                    except Exception as e:                       # noqa: BLE001
-                        print(f"[video] render failed ({e}); disabling videos")
-                        self.renderer, self.render_ok = None, False
+                r["kp"].append(info["kp_err"]); r["hand"].append(info["hand_err"]); r["foot"].append(info["foot_err"])
+                if film and k < n_video and self.renderer is not None:
+                    self._frame(frames)
                 if term or trunc:
-                    full += int(trunc and not term)
                     break
-            else:
-                full += 1
-            lens.append((k + 1) * env.dt)
+            if film and self.renderer is not None and frames:            # hold the last frame briefly
+                frames += [frames[-1]] * max(0, min(10, n_video - (k + 1)))
+            r["surv"].append(info.get("survival", 1.0))
+            r["len"].append((k + 1) * env.dt)
 
         label = _pct_label(pct, model.num_timesteps)
         video = ""
         if frames:
             video = write_video(frames, os.path.join(self.log_dir, "videos", f"{self.run}_{label}.mp4"),
                                 fps=round(1.0 / env.dt))
+        cat = lambda key: [v for k in self.kinds for v in res[k][key]]
+        cm = lambda xs: round(100 * float(np.nanmean(xs)), 2) if len(xs) else np.nan
         row = {"pct": round(pct, 1), "timesteps": int(model.num_timesteps),
-               "wall_minutes": round((time.time() - self.t0) / 60, 1), "episodes": self.eval_episodes,
-               "ep_len_s": round(float(np.mean(lens)), 2), "survived_full_frac": round(full / self.eval_episodes, 2),
-               "kp_err_cm": round(100 * float(np.nanmean(kp)), 2), "hand_err_cm": round(100 * float(np.nanmean(hand)), 2),
-               "foot_err_cm": round(100 * float(np.nanmean(foot)), 2), "video": os.path.basename(video)}
+               "wall_minutes": round((time.time() - self.t0) / 60, 1),
+               "survival": round(float(np.mean(cat("surv"))), 3), "ep_len_s": round(float(np.mean(cat("len"))), 2),
+               "kp_err_cm": cm(cat("kp")), "hand_err_cm": cm(cat("hand")), "foot_err_cm": cm(cat("foot")),
+               "video": os.path.basename(video)}
+        for k in self.kinds:
+            row[f"survival_{k}"] = round(float(np.mean(res[k]["surv"])), 3) if res[k]["surv"] else np.nan
+            row[f"kp_err_cm_{k}"] = cm(res[k]["kp"])
         new = not os.path.exists(self.csv_path)
         with open(self.csv_path, "a", newline="") as f:
-            wr = csv.DictWriter(f, fieldnames=self.FIELDS)
+            wr = csv.DictWriter(f, fieldnames=self.fields)
             if new:
                 wr.writeheader()
             wr.writerow(row)
-        for key in ("ep_len_s", "survived_full_frac", "kp_err_cm", "hand_err_cm", "foot_err_cm"):
+        for key in ["survival", "ep_len_s", "kp_err_cm", "hand_err_cm", "foot_err_cm"] + \
+                   [f"survival_{k}" for k in self.kinds]:
             self.logger.record(f"eval/{key}", row[key])
-        print(f"[eval {row['pct']:5.1f}%] ep_len {row['ep_len_s']:.2f} s, kp err {row['kp_err_cm']:.1f} cm"
-              + (f", video {row['video']}" if video else ""))
+        per_kind = "  ".join(f"{k} {row[f'survival_{k}']:.2f}" for k in self.kinds)
+        print(f"[eval {row['pct']:5.1f}%] survival {row['survival']:.2f} ({per_kind}), "
+              f"kp err {row['kp_err_cm']:.1f} cm" + (f", video {row['video']}" if video else ""))
 
     def record_now(self, label_pct=None):
         """Extra evaluation outside the schedule (used for the final model, e.g. after Ctrl-C)."""

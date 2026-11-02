@@ -13,15 +13,15 @@ Everything a run produces goes to logs/<run>/ (see run_logging.py):
     folder already exists moves the old folder to logs/<run>_<date-time> instead of overwriting it.
 
 What to watch in logs/<run>/progress.csv (or TensorBoard if installed):
-    track/ep_len_s       seconds survived per episode   (starts ~0.9 s, should climb towards 10 s)
-    track/kp_err_cm      mean keypoint error per step   (starts ~10 cm, good policies reach 3-5 cm)
-    track/fall_rate      fraction of episodes ending in a fall / lost tracking
-    track/assist         balance-assist strength if you enable it (ep_len dips while it fades; judge
-                         the policy on the numbers after it reaches 0)
-    rollout/ep_rew_mean  is still logged, but it mixes episode length and quality, so it is noisy;
-                         track/reward_per_step is the cleaner number.
-    eval/*               the same 5 fixed episodes, deterministic policy, unassisted - the most
-                         comparable number across the run (also in eval.csv next to each video)
+    eval/survival          fraction of the fixed evaluation episodes survived (1.0 = never falls);
+    eval/survival_<kind>   the same per motion kind - the most comparable numbers across a run
+    curriculum/level       motion kinds unlocked (2 = upper + whole body; 3 adds one-leg balance; 4 steps)
+    curriculum/survival_*  training survival per kind; the next kind unlocks when all are >= 0.8
+    track/end_fell         fraction of episodes ending in a fall   (vs track/end_lost: pose error too big)
+    track/cp_margin_cm     how far the capture point stays inside the feet (> 0 = balanced)
+    track/kp_err_cm        mean keypoint error per step
+    track/reward_balance / track/reward_tracking   the two halves of the reward
+    rollout/ep_rew_mean is still logged but dips every time the curriculum adds harder motions.
 
 The env ids are registered at the TOP LEVEL of this file because SubprocVecEnv workers need them in
 every process.
@@ -39,9 +39,9 @@ from stable_baselines3.common.logger import configure
 from stable_baselines3.common.vec_env import SubprocVecEnv, VecNormalize
 
 import G1_tele                                                   # noqa: F401  (registers G1-* ids)
-from G1_tele.policies.hand_tracking import HandTrackingPolicy    # plain actor-critic MLP, see that file
-from run_logging import (PeriodicCheckpointCallback, PeriodicVideoEvalCallback, TrackingStatsCallback,
-                         prepare_run_dir, save_config)
+from G1_tele.policies.pose_tracking import PoseTrackingPolicy    # actor: robot obs only, critic: + privileged
+from run_logging import (CurriculumCallback, PeriodicCheckpointCallback, PeriodicVideoEvalCallback,
+                         TrackingStatsCallback, prepare_run_dir, save_config)
 
 # ------------------------------------------------------------------ config (top level on purpose)
 ENTRY = "G1_tele.envs.pose_tracking:PoseTrackingEnv"
@@ -51,8 +51,9 @@ COMMON = dict(
     keypoints="full",          # reward keypoints: "minimal" (hands+feet), "limbs", "full", or a list
     obs_keypoints=None,        # keypoints the policy sees (None = same); e.g. "minimal" for a 4-point tracker
     residual=True,             # PD target = reference joints + action (needs IK at deploy time)
+    reward_weights=None,       # e.g. dict(kp=0.3, cp=0.1) to trade balance for accuracy; see REWARD_WEIGHTS
 )
-N_ENVS = 16                    # ~ number of auto cores
+N_ENVS = 16                    # ~ number of CPU cores
 # Optional balance assist: a stabilising push on the pelvis (towards the reference height and tilt)
 # that fades linearly to zero over the first ASSIST_STEPS of stage 1. Off by default (in short tests it
 # did not beat plain training); try ASSIST = 1.0 if track/ep_len_s is still flat after ~10M steps.
@@ -67,13 +68,20 @@ register(id=STAGE2, entry_point=ENTRY, kwargs={**COMMON, "push_force": 60.0, "fr
 EVAL_ID = "G1-pose-eval"
 
 POLICY_KW = dict(net_arch=dict(pi=[512, 256, 128], vf=[512, 256, 128]), log_std_init=-1.0)
-PPO_KW = dict(n_steps=256, batch_size=1024, n_epochs=5, gamma=0.99, gae_lambda=0.95, clip_range=0.2,
-              ent_coef=0.0, vf_coef=0.5, max_grad_norm=1.0)
+# gamma 0.995 = ~4 s horizon at 50 Hz, so a fall 2-3 s away still matters to the policy (0.99 = ~2 s).
+# target_kl stops an update early if the policy moves too far, the usual cause of "up, then down".
+PPO_KW = dict(n_steps=512, batch_size=2048, n_epochs=5, gamma=0.995, gae_lambda=0.95, clip_range=0.2,
+              target_kl=0.03, ent_coef=0.0, vf_coef=0.5, max_grad_norm=1.0)
+LR_STAGE1, LR_STAGE2 = (2e-4, 3e-5), (5e-5, 1e-5)          # linear decay start -> end
+
+CURRICULUM = True              # start on feet-planted motions, unlock one-leg balance and steps later
+CURRICULUM_START = 2           # kinds unlocked at the start: upper, whole
+CURRICULUM_THRESHOLD = 0.8     # unlock the next kind when every unlocked kind survives >= 80 %
 
 LOG_ROOT = "logs"
 VIDEO_EVERY_PCT = 5            # evaluate + film every 5 % of the run (and at 0 %)
-VIDEO_SECONDS = 8.0            # length of each video
-EVAL_EPISODES = 5              # fixed episodes per evaluation (only the first VIDEO_SECONDS are filmed)
+VIDEO_SECONDS_PER_KIND = 4.0   # each video: this many seconds of one episode per motion kind
+EVAL_EPISODES_PER_KIND = 2     # fixed evaluation episodes per motion kind
 CHECKPOINT_EVERY_PCT = 10      # back up model + normalisation stats every 10 % of the run
 
 
@@ -94,13 +102,14 @@ def run(env_name, run_name, total_timesteps, n_envs=N_ENVS, init_run=None):
         src = os.path.join(LOG_ROOT, init_run, init_run)
         venv = VecNormalize.load(f"{src}_vecnormalize.pkl", venv)
         venv.training, venv.norm_reward = True, True
-        lr = (1e-4, 3e-5)
-        model = PPO.load(src, env=venv, device="auto", learning_rate=linear_schedule(*lr))
+        lr = LR_STAGE2
+        model = PPO.load(src, env=venv, device="cpu", learning_rate=linear_schedule(*lr))
     else:
         venv = VecNormalize(venv, norm_obs=True, norm_reward=True, clip_obs=10.0, gamma=PPO_KW["gamma"])
-        lr = (3e-4, 5e-5)
-        model = PPO(HandTrackingPolicy, venv, policy_kwargs=POLICY_KW, learning_rate=linear_schedule(*lr),
-                    device="auto", verbose=1, **PPO_KW)
+        lr = LR_STAGE1
+        n_actor = venv.get_attr("n_actor_obs", indices=[0])[0]
+        model = PPO(PoseTrackingPolicy, venv, policy_kwargs={**POLICY_KW, "actor_obs_dim": n_actor},
+                    learning_rate=linear_schedule(*lr), device="cpu", verbose=1, **PPO_KW)
     fmt = ["stdout", "csv"]
     try:
         import tensorboard  # noqa: F401
@@ -110,14 +119,21 @@ def run(env_name, run_name, total_timesteps, n_envs=N_ENVS, init_run=None):
     model.set_logger(configure(log_dir, fmt))
     save_config(log_dir, run=run_name, env_id=env_name, env_kwargs=gym.spec(env_name).kwargs,
                 eval_env_id=EVAL_ID, n_envs=n_envs, total_timesteps=total_timesteps, init_run=init_run,
-                ppo=PPO_KW, policy=POLICY_KW, learning_rate=lr, video_every_pct=VIDEO_EVERY_PCT,
-                checkpoint_every_pct=CHECKPOINT_EVERY_PCT, eval_episodes=EVAL_EPISODES)
+                ppo=PPO_KW, policy=POLICY_KW, learning_rate=lr, curriculum=CURRICULUM,
+                curriculum_start=CURRICULUM_START, curriculum_threshold=CURRICULUM_THRESHOLD,
+                video_every_pct=VIDEO_EVERY_PCT, checkpoint_every_pct=CHECKPOINT_EVERY_PCT,
+                eval_episodes_per_kind=EVAL_EPISODES_PER_KIND)
 
     recorder = PeriodicVideoEvalCallback(EVAL_ID, total_timesteps, log_dir, run_name, every_pct=VIDEO_EVERY_PCT,
-                                         video_seconds=VIDEO_SECONDS, eval_episodes=EVAL_EPISODES)
+                                         video_seconds_per_kind=VIDEO_SECONDS_PER_KIND,
+                                         episodes_per_kind=EVAL_EPISODES_PER_KIND)
     callbacks = [TrackingStatsCallback(),
                  PeriodicCheckpointCallback(total_timesteps, log_dir, run_name, every_pct=CHECKPOINT_EVERY_PCT),
                  recorder]
+    if CURRICULUM:
+        prev = os.path.join(LOG_ROOT, init_run, "curriculum.json") if init_run else None
+        callbacks.insert(1, CurriculumCallback(log_dir, start=CURRICULUM_START, threshold=CURRICULUM_THRESHOLD,
+                                               state_from=prev))
     finished = False
     try:
         model.learn(total_timesteps, callback=callbacks, progress_bar=True,
@@ -144,7 +160,7 @@ def load_policy(model_path, env_name):
     venv = make_env(env_name, 1, assist=0.0)                 # never assist when evaluating
     venv = VecNormalize.load(f"{base}_vecnormalize.pkl", venv)
     venv.training, venv.norm_reward = False, False
-    return PPO.load(base, device="auto"), venv
+    return PPO.load(base, device="cpu"), venv
 
 
 def visualise(env_name, model_path, seconds=None):
@@ -171,7 +187,7 @@ def visualise(env_name, model_path, seconds=None):
 
 def check():
     env = gym.make(STAGE1, assist=0.0).unwrapped
-    print(f"obs {env.observation_space.shape}, action {env.action_space.shape}, "
+    print(f"obs {env.observation_space.shape} (actor sees the first {env.n_actor_obs}), action {env.action_space.shape}, "
           f"{env.lib.n_clips} clips, {sum(env.lib.duration(c) for c in range(env.lib.n_clips)) / 60:.1f} min of motion")
     lens, t0, n = [], time.time(), 0
     for ep in range(10):
