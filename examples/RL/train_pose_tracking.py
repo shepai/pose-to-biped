@@ -2,6 +2,7 @@
 examples/train_pose_tracking.py  -  whole-body pose tracking for the G1 with Stable-Baselines3 PPO
 
     python train_pose_tracking.py check      # 20 s sanity check of the env (no training)
+    python train_pose_tracking.py video      # test video recording: which OpenGL backend works, writes a clip
     python train_pose_tracking.py train      # stage 1: track the motion library, no disturbances
     python train_pose_tracking.py train2     # stage 2: resume stage 1 + pushes, friction, sensor noise
     python train_pose_tracking.py play       # watch stage 1 (play2 for stage 2) - spheres are the targets
@@ -38,10 +39,12 @@ from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.logger import configure
 from stable_baselines3.common.vec_env import SubprocVecEnv, VecNormalize
 
-import G1_tele                                                   # noqa: F401  (registers G1-* ids)
-from G1_tele.policies.pose_tracking import PoseTrackingPolicy    # actor: robot obs only, critic: + privileged
-from run_logging import (CurriculumCallback, PeriodicCheckpointCallback, PeriodicVideoEvalCallback,
-                         TrackingStatsCallback, prepare_run_dir, save_config)
+from run_logging import (GL_INFO, CurriculumCallback, PeriodicCheckpointCallback, PeriodicVideoEvalCallback,
+                         TrackingStatsCallback, configure_mujoco_gl, prepare_run_dir, save_config, write_video)
+configure_mujoco_gl()          # picks MuJoCo's OpenGL backend for videos - must happen before mujoco is imported
+
+import G1_tele                                                   # noqa: E402,F401  (registers G1-* ids)
+from G1_tele.policies.pose_tracking import PoseTrackingPolicy    # noqa: E402  actor: robot obs, critic: + privileged
 
 # ------------------------------------------------------------------ config (top level on purpose)
 ENTRY = "G1_tele.envs.pose_tracking:PoseTrackingEnv"
@@ -122,7 +125,7 @@ def run(env_name, run_name, total_timesteps, n_envs=N_ENVS, init_run=None):
                 ppo=PPO_KW, policy=POLICY_KW, learning_rate=lr, curriculum=CURRICULUM,
                 curriculum_start=CURRICULUM_START, curriculum_threshold=CURRICULUM_THRESHOLD,
                 video_every_pct=VIDEO_EVERY_PCT, checkpoint_every_pct=CHECKPOINT_EVERY_PCT,
-                eval_episodes_per_kind=EVAL_EPISODES_PER_KIND)
+                eval_episodes_per_kind=EVAL_EPISODES_PER_KIND, mujoco_gl=dict(GL_INFO))
 
     recorder = PeriodicVideoEvalCallback(EVAL_ID, total_timesteps, log_dir, run_name, every_pct=VIDEO_EVERY_PCT,
                                          video_seconds_per_kind=VIDEO_SECONDS_PER_KIND,
@@ -202,10 +205,103 @@ def check():
           f"{n / (time.time() - t0):.0f} env steps/s in one process")
 
 
+_RENDER_TEST = (
+    "import mujoco\n"
+    "m = mujoco.MjModel.from_xml_string('<mujoco><worldbody><light pos=\"0 0 2\"/>"
+    "<geom type=\"sphere\" size=\".2\" rgba=\"1 0 0 1\"/></worldbody></mujoco>')\n"
+    "d = mujoco.MjData(m); mujoco.mj_forward(m, d)\n"
+    "r = mujoco.Renderer(m, 64, 64); r.update_scene(d); img = r.render()\n"
+    "print('RENDER_OK', int(img.max()))\n")
+
+
+def video_check():
+    """Find out why videos fail: test each OpenGL backend in a fresh process, the video writers, then
+    record a short clip through exactly the code the training uses."""
+    import platform
+    import subprocess
+    print(f"platform {platform.platform()}, python {sys.version.split()[0]}")
+    print(f"DISPLAY={os.environ.get('DISPLAY', '')!r}  WAYLAND_DISPLAY={os.environ.get('WAYLAND_DISPLAY', '')!r}")
+    print(f"training would use MUJOCO_GL={GL_INFO['backend']} ({GL_INFO['why']})\n")
+
+    print("1) off-screen rendering, one fresh process per backend:")
+    works = []
+    for backend in ("glfw", "egl", "osmesa"):
+        env = {**os.environ, "MUJOCO_GL": backend}
+        env.pop("PYOPENGL_PLATFORM", None)
+        try:
+            p = subprocess.run([sys.executable, "-c", _RENDER_TEST], env=env, capture_output=True, text=True,
+                               timeout=120)
+            out = p.stdout + p.stderr
+        except Exception as e:                               # noqa: BLE001
+            out = f"{type(e).__name__}: {e}"
+        if "RENDER_OK" in out:
+            black = out.split("RENDER_OK")[1].split()[0] == "0"
+            works.append(backend)
+            print(f"   MUJOCO_GL={backend:7s} works" + ("  (but the image was black)" if black else ""))
+        else:
+            lines = [ln for ln in out.strip().splitlines() if ln.strip()]
+            print(f"   MUJOCO_GL={backend:7s} fails: {lines[-1][:150] if lines else 'no output'}")
+
+    print("\n2) video writers:")
+    try:
+        import imageio
+        try:
+            import imageio_ffmpeg
+            print(f"   imageio {imageio.__version__} + ffmpeg {imageio_ffmpeg.get_ffmpeg_version()}  -> mp4")
+        except Exception:                                    # noqa: BLE001
+            print(f"   imageio {imageio.__version__} but no imageio-ffmpeg (pip install imageio-ffmpeg)")
+    except ImportError:
+        print("   imageio not installed (pip install imageio imageio-ffmpeg)")
+    try:
+        import cv2
+        print(f"   opencv {cv2.__version__}")
+    except ImportError:
+        print("   opencv not installed (optional)")
+    test = np.zeros((40, 64, 64, 3), np.uint8)
+    test[:, 16:48, 16:48, 0] = 255
+    path, how = write_video(list(test), os.path.join(LOG_ROOT, "video_test", "writer_test.mp4"), fps=50)
+    print(f"   test file -> {how}: {path}")
+
+    print(f"\n3) a clip through the training code (MUJOCO_GL={os.environ.get('MUJOCO_GL', 'glfw (default)')}, "
+          "untrained robot, zero actions):")
+
+    class _ZeroPolicy:                                       # stands in for the PPO model
+        num_timesteps, env = 0, None
+
+        def __init__(self, n):
+            self.n = n
+            self.logger = type("L", (), {"record": lambda *a, **k: None})()
+
+        def predict(self, obs, deterministic=True):
+            return np.zeros(self.n, np.float32), None
+
+        def get_vec_normalize_env(self):
+            return None
+
+    rec = PeriodicVideoEvalCallback(EVAL_ID, 1, os.path.join(LOG_ROOT, "video_test"), "video_test",
+                                    video_seconds_per_kind=2.0, episodes_per_kind=1)
+    rec.init_callback(_ZeroPolicy(gym.make(EVAL_ID).action_space.shape[0]))
+    rec.record_now(0.0)
+    rec.close()
+
+    print("\nresult:")
+    if rec.video_status == "on":
+        print(f"   videos work with MUJOCO_GL={os.environ.get('MUJOCO_GL', 'glfw')}; "
+              f"see {os.path.join(LOG_ROOT, 'video_test', 'videos')}")
+    elif works:
+        print(f"   start training with a backend that works:  MUJOCO_GL={works[0]} python train_pose_tracking.py train")
+    else:
+        print("   no OpenGL backend works on this machine. On Ubuntu/Debian try:\n"
+              "     sudo apt install libegl1 libgl1 libosmesa6 && pip install PyOpenGL\n"
+              "   then run this check again. Training itself works without videos.")
+
+
 if __name__ == "__main__":
     mode = sys.argv[1] if len(sys.argv) > 1 else "train"
     if mode == "check":
         check()
+    elif mode == "video":
+        video_check()
     elif mode == "train":
         run(STAGE1, "pose_stage1", 60_000_000)
     elif mode == "train2":
