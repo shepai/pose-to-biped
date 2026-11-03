@@ -17,11 +17,33 @@ stage 2 also gets its own 0..100 %.
 import csv
 import json
 import os
+import sys
 import time
 
 import numpy as np
 import gymnasium as gym
 from stable_baselines3.common.callbacks import BaseCallback
+
+
+# ------------------------------------------------------------------ OpenGL backend for videos
+GL_INFO = {"backend": None, "why": "not configured"}
+
+
+def configure_mujoco_gl():
+    """Choose MuJoCo's off-screen OpenGL backend. Must run BEFORE anything imports mujoco: MuJoCo
+    reads MUJOCO_GL once, at import. Its default, glfw, needs a display - over SSH, on a server,
+    in a container or in WSL without WSLg it cannot make a renderer and every video fails. With no
+    display we switch to EGL (GPU, needs libEGL) - check with `python train_pose_tracking.py video`."""
+    if "mujoco" in sys.modules:
+        GL_INFO.update(backend=os.environ.get("MUJOCO_GL", "glfw"), why="mujoco was already imported")
+    elif os.environ.get("MUJOCO_GL"):
+        GL_INFO.update(backend=os.environ["MUJOCO_GL"], why="set in your environment")
+    elif sys.platform.startswith("linux") and not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
+        os.environ["MUJOCO_GL"] = "egl"
+        GL_INFO.update(backend="egl", why="no display found, so EGL was chosen automatically")
+    else:
+        GL_INFO.update(backend="glfw", why="default (a display is available)")
+    return GL_INFO["backend"]
 
 
 # ------------------------------------------------------------------ run directory / config
@@ -49,32 +71,47 @@ def _pct_label(pct, steps):
 
 # ------------------------------------------------------------------ video writing
 def write_video(frames, path, fps):
-    """mp4 via imageio or OpenCV; falls back to a GIF (Pillow) if neither is installed.
-    Returns the path actually written."""
+    """Write frames (list of HxWx3 uint8) to `path`. Tries imageio (ffmpeg) -> OpenCV -> GIF (Pillow)
+    -> raw frames (.npz), and checks each file really exists afterwards - OpenCV without an mp4
+    codec "succeeds" without writing anything. Returns (path_written, how); never raises."""
     frames = [np.asarray(f, np.uint8) for f in frames]
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    written = lambda p: os.path.exists(p) and os.path.getsize(p) > 100
+    errors = []
     try:
         import imageio.v2 as imageio
         imageio.mimwrite(path, frames, fps=fps, macro_block_size=1)
-        return path
-    except Exception:                                            # noqa: BLE001
-        pass
+        if written(path):
+            return path, "mp4 (imageio)"
+        errors.append("imageio wrote nothing")
+    except Exception as e:                                       # noqa: BLE001
+        errors.append(f"imageio: {str(e).splitlines()[0][:120] if str(e) else type(e).__name__}")
     try:
         import cv2
         h, w = frames[0].shape[:2]
         vw = cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*"mp4v"), fps, (w, h))
+        if not vw.isOpened():
+            raise RuntimeError("VideoWriter could not open an mp4 file (no codec)")
         for f in frames:
             vw.write(cv2.cvtColor(f, cv2.COLOR_RGB2BGR))
         vw.release()
-        return path
-    except Exception:                                            # noqa: BLE001
-        pass
-    from PIL import Image
-    gif = os.path.splitext(path)[0] + ".gif"
-    imgs = [Image.fromarray(f) for f in frames[::2]]
-    imgs[0].save(gif, save_all=True, append_images=imgs[1:], duration=int(2000 / fps), loop=0)
-    print("[video] imageio-ffmpeg / opencv not found - wrote a GIF instead "
-          "(pip install imageio imageio-ffmpeg for mp4)")
-    return gif
+        if written(path):
+            return path, "mp4 (opencv)"
+        errors.append("opencv wrote nothing")
+    except Exception as e:                                       # noqa: BLE001
+        errors.append(f"opencv: {str(e).splitlines()[0][:120] if str(e) else type(e).__name__}")
+    try:
+        from PIL import Image
+        gif = os.path.splitext(path)[0] + ".gif"
+        imgs = [Image.fromarray(f) for f in frames[::2]]
+        imgs[0].save(gif, save_all=True, append_images=imgs[1:], duration=int(2000 / fps), loop=0)
+        if written(gif):
+            return gif, "gif (no mp4 writer: " + "; ".join(errors) + ")"
+    except Exception as e:                                       # noqa: BLE001
+        errors.append(f"pillow: {e}")
+    npz = os.path.splitext(path)[0] + "_frames.npz"
+    np.savez_compressed(npz, frames=np.stack(frames[::2]), fps=fps / 2)
+    return npz, "raw frames only (" + "; ".join(errors) + ")"
 
 
 # ------------------------------------------------------------------ callbacks
@@ -269,6 +306,8 @@ class PeriodicVideoEvalCallback(_PercentCallback):
         self.size, self.cam_cfg = (width, height), (distance, azimuth, elevation)
         self.env = self.renderer = None
         self.render_ok = True
+        self.video_status = "not started"
+        self.announced = False
         self.t0 = time.time()
         self.csv_path = os.path.join(log_dir, "eval.csv")
 
@@ -304,8 +343,18 @@ class PeriodicVideoEvalCallback(_PercentCallback):
             self.cam = cam
         except Exception as e:                                   # noqa: BLE001
             self.render_ok = False
-            print(f"[video] rendering unavailable ({e}); evaluations continue without videos. "
-                  "On a headless machine try MUJOCO_GL=egl (or osmesa).")
+            self._videos_off(f"could not create an off-screen renderer: {str(e).strip() or type(e).__name__}")
+
+    def _videos_off(self, reason):
+        self.video_status = "off"
+        gl = os.environ.get("MUJOCO_GL", "glfw (default)")
+        bar = "=" * 92
+        print(f"\n{bar}\n[video] VIDEOS ARE OFF - {reason}\n"
+              f"[video] MUJOCO_GL={gl} ({GL_INFO['why']})\n"
+              f"[video] Training and the eval.csv numbers carry on. To find a backend that works, run\n"
+              f"[video]     python train_pose_tracking.py video\n"
+              f"[video] then start training with it, e.g.  MUJOCO_GL=egl python train_pose_tracking.py train\n{bar}\n",
+              flush=True)
 
     def _frame(self, frames):
         try:
@@ -313,8 +362,8 @@ class PeriodicVideoEvalCallback(_PercentCallback):
             self.env.draw_targets(self.renderer.scene)
             frames.append(self.renderer.render().copy())
         except Exception as e:                                   # noqa: BLE001
-            print(f"[video] render failed ({e}); disabling videos")
             self.renderer, self.render_ok = None, False
+            self._videos_off(f"rendering a frame failed: {str(e).strip() or type(e).__name__}")
 
     # ---------- one evaluation
     def _fire(self, pct):
@@ -345,17 +394,24 @@ class PeriodicVideoEvalCallback(_PercentCallback):
             r["len"].append((k + 1) * env.dt)
 
         label = _pct_label(pct, model.num_timesteps)
-        video = ""
+        video, video_col = "", "off (see training log)" if not self.render_ok else "no frames"
         if frames:
-            video = write_video(frames, os.path.join(self.log_dir, "videos", f"{self.run}_{label}.mp4"),
-                                fps=round(1.0 / env.dt))
+            if max(int(f.max()) for f in frames[:: max(1, len(frames) // 10)]) == 0:
+                print("[video] warning: rendered frames are completely black (broken OpenGL driver?)")
+            video, how = write_video(frames, os.path.join(self.log_dir, "videos", f"{self.run}_{label}.mp4"),
+                                     fps=round(1.0 / env.dt))
+            video_col = os.path.basename(video)
+            if not self.announced or not how.startswith("mp4"):
+                print(f"[video] {how}: {video}  (MUJOCO_GL={os.environ.get('MUJOCO_GL', 'glfw (default)')})")
+                self.announced = True
+            self.video_status = "on"
         cat = lambda key: [v for k in self.kinds for v in res[k][key]]
         cm = lambda xs: round(100 * float(np.nanmean(xs)), 2) if len(xs) else np.nan
         row = {"pct": round(pct, 1), "timesteps": int(model.num_timesteps),
                "wall_minutes": round((time.time() - self.t0) / 60, 1),
                "survival": round(float(np.mean(cat("surv"))), 3), "ep_len_s": round(float(np.mean(cat("len"))), 2),
                "kp_err_cm": cm(cat("kp")), "hand_err_cm": cm(cat("hand")), "foot_err_cm": cm(cat("foot")),
-               "video": os.path.basename(video)}
+               "video": video_col}
         for k in self.kinds:
             row[f"survival_{k}"] = round(float(np.mean(res[k]["surv"])), 3) if res[k]["surv"] else np.nan
             row[f"kp_err_cm_{k}"] = cm(res[k]["kp"])
@@ -370,7 +426,7 @@ class PeriodicVideoEvalCallback(_PercentCallback):
             self.logger.record(f"eval/{key}", row[key])
         per_kind = "  ".join(f"{k} {row[f'survival_{k}']:.2f}" for k in self.kinds)
         print(f"[eval {row['pct']:5.1f}%] survival {row['survival']:.2f} ({per_kind}), "
-              f"kp err {row['kp_err_cm']:.1f} cm" + (f", video {row['video']}" if video else ""))
+              f"kp err {row['kp_err_cm']:.1f} cm, video: {video_col}", flush=True)
 
     def record_now(self, label_pct=None):
         """Extra evaluation outside the schedule (used for the final model, e.g. after Ctrl-C)."""
@@ -381,3 +437,4 @@ class PeriodicVideoEvalCallback(_PercentCallback):
         if self.renderer is not None:
             self.renderer.close()
             self.renderer = None
+
