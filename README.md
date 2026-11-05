@@ -1,6 +1,6 @@
 # pose-to-biped
 
-Teaching a simulated Unitree G1 humanoid to copy a person's pose while keeping its balance, with reinforcement learning in MuJoCo. The long-term aim is to drive the robot from a live body tracker. This README covers the simulation and reinforcement learning side; pose detection will be documented separately.
+Teaching a simulated Unitree G1 humanoid to copy a person's pose while keeping its balance, with reinforcement learning in MuJoCo. The long-term aim is to drive the robot from a live body tracker, and the first version of that is here: the simulated robot copies the person in front of your webcam. This README covers the simulation, the reinforcement learning and the webcam demo; the `pose/` folder will be documented separately.
 
 ![The simulated G1 following reference poses](assets/following.gif)
 
@@ -14,13 +14,16 @@ One policy drives 23 of the G1's 29 joints (the wrists are held still). It is gi
 - [Installation](#installation)
 - [Quick start: watch a trained policy](#quick-start-watch-a-trained-policy)
 - [Examples](#examples)
+  - [Copy a person with your webcam](#copy-a-person-with-your-webcam-live_posepy)
+  - [Record your own motions](#record-your-own-motions-record_motionpy)
+  - [Fine-tune on new motions](#fine-tune-on-new-motions-finetunepy)
   - [Train a policy](#train-a-policy-train_pose_trackingpy)
   - [Make GIFs of checkpoints](#make-gifs-of-checkpoints-gif_makerpy)
   - [Build motion libraries](#build-motion-libraries-make_motionspy)
   - [Drive the G1 with the keyboard](#drive-the-g1-with-the-keyboard-keyboard_controlpy)
   - [Use the environment in your own code](#use-the-environment-in-your-own-code)
 - [Troubleshooting](#troubleshooting)
-- [Older scripts](#older-scripts)
+- [Other files](#other-files)
 - [Pose detection](#pose-detection)
 
 ## What's in the repository
@@ -31,29 +34,40 @@ Only the parts used for reinforcement learning are listed here.
 src/G1_tele/                    the Python package (installed by `pip install -e .`)
   envs/
     pose_tracking.py            G1-pose-tracking: the whole-body pose-tracking environment
+    live.py                     G1-pose-live: the same, following a live reference (e.g. a camera)
     whole_body.py               29-joint G1 base: PD control, joint armature, torque limits
     walker.py                   G1-walker: the 12 leg motors only, for Unitree's walking policy
   motion/
     library.py                  reference-motion files (.npz): load, save, merge
     synthetic.py                generates balanced whole-body motions with inverse kinematics
     retarget.py                 turns tracker keypoints into a full robot pose
+    human.py                    turns MediaPipe body landmarks into robot keypoints
+    recording.py                cleans camera recordings into training motions
     kinematics.py               forward kinematics and the keypoint definitions
+  teleop.py                     person -> robot: find a torso, reset into their pose, follow them
   policies/
     pose_tracking.py            the actor-critic network used for training
     motion.pt, g1.yaml          Unitree's pretrained walking policy and its settings
   assets/
     g1_description/             Unitree G1 models (MuJoCo .xml, .urdf) and meshes
     motions/synthetic.npz       the default motion library: 120 clips, 42.8 min
+    motions/human/<name>/       your own recordings (record_motion.py), one file per slot
 examples/RL/
+  live_pose.py                  the robot copies the person in front of your webcam
+  record_motion.py              record motion data from a webcam, unattended
+  finetune.py                   keep training a policy on new motions
   train_pose_tracking.py        train, test and watch policies
   run_logging.py                logs, evaluation videos, checkpoints and the curriculum
   gif_maker.py                  turns checkpoints into GIFs (no window needed)
   make_motions.py               builds or extends the motion library
   show_policy.py                minimal example of calling visualise() from your own script
 examples/keyboard_control.py    drive the G1 with the arrow keys using the pretrained walking policy
+examples/live_pose.py           a copy of examples/RL/live_pose.py
 logs/
-  pose_stage1/checkpoints/      a stage 1 checkpoint from 30 % of training (18 M steps)
-  pose_stage1T1/progress.csv    the full stage 1 training log
+  pose_stage1/checkpoints/      a stage 1 checkpoint from 30 % of training (18 M steps), with a GIF of it
+  pose_stage1T1/                the final stage 1 model (60 M steps) and its training log
+  plotter.py                    plots the episode reward of every run under logs/
+assets/                         pictures and videos for this README (demo.mp4: a webcam session)
 ```
 
 ## Installation
@@ -74,6 +88,9 @@ pip install -e .
 
 # Training, videos and GIFs
 pip install stable-baselines3 imageio imageio-ffmpeg pillow
+
+# The webcam demo (MediaPipe body tracking)
+pip install "mediapipe==0.10.14"
 
 # Optional: live training curves
 pip install tensorboard
@@ -110,19 +127,216 @@ This tries each OpenGL backend (`glfw`, `egl`, `osmesa`) and the video writers, 
 
 ## Quick start: watch a trained policy
 
-The repository includes a checkpoint from 30 % of stage 1 (18 million steps):
+The repository includes the final stage 1 model (60 million steps) and a checkpoint from 30 % of the way through (18 million steps):
 
 ```bash
 # Opens a MuJoCo window. Red spheres are the left-side targets, blue the right.
+python examples/RL/train_pose_tracking.py play logs/pose_stage1T1/pose_stage1T1
+
+# The 30 % checkpoint, to compare
 python examples/RL/train_pose_tracking.py play logs/pose_stage1/checkpoints/pose_stage1_030pct_18.0M
 
 # No screen? Record a GIF instead.
-python examples/RL/gif_maker.py logs/pose_stage1/checkpoints/pose_stage1_030pct_18.0M --out stage1_30pct.gif
+python examples/RL/gif_maker.py logs/pose_stage1T1/pose_stage1T1 --out stage1_final.gif
+
+# Or have it copy you through your webcam
+python examples/RL/live_pose.py
 ```
 
 Run all commands from the repository root: runs are written to `logs/` in the current folder.
 
 ## Examples
+
+### Copy a person with your webcam (`live_pose.py`)
+
+The trained policy follows a person in front of a camera. [MediaPipe Pose](https://github.com/google-ai-edge/mediapipe) finds the person's body in each frame, and the simulated G1 copies them while keeping its balance.
+
+![live_pose.py: the camera with the MediaPipe skeleton, and the simulated G1 copying it](assets/live_demo.gif)
+
+The full 27 s session is in [`assets/demo.mp4`](assets/demo.mp4). Near the end a deep squat with the arms out makes the robot fall a few times, and each time it is reset into the person's pose.
+
+```bash
+python examples/RL/live_pose.py                           # webcam 0, the final stage 1 model
+python examples/RL/live_pose.py --camera 1                # another camera
+python examples/RL/live_pose.py --video clip.mp4 --loop   # a video file instead of a webcam
+python examples/RL/live_pose.py --record live.mp4         # record from the start (or press v any time)
+python examples/RL/live_pose.py --model logs/pose_stage1/checkpoints/pose_stage1_030pct_18.0M
+```
+
+One window shows the camera, with the MediaPipe skeleton drawn on it, next to the robot. The robot's target keypoints are drawn as spheres (red = left, blue = right).
+
+- **Finding you:** nothing happens until your torso (both shoulders and hips) has been visible for 8 camera frames. Then the robot is reset into your pose, and the policy starts following you.
+- **Losing you:** if you leave the picture, the robot holds your last pose for 2 s. If you come back in that time it carries on. Otherwise it eases back to standing, and the next time you're found it resets into your pose again.
+- **Falls:** if the robot falls, it is reset into your current pose.
+- **Arms or legs out of view:** these stay in the robot's default pose. Sitting at a desk with only your upper body visible works: the robot stands and copies your arms and torso.
+- **Camera tilt:** "up" is taken from your torso when you're first found, which corrects a tilted camera. Stand or sit upright as you step in, or press `c` to do it again.
+
+The robot copies your pose relative to your hips. Turning on the spot and walking around aren't copied. Stepping on the spot and lifting a foot are.
+
+| Key | Action |
+|---|---|
+| `v` | start / stop recording a video |
+| `r` | reset the robot into your pose now |
+| `c` | re-level the camera from your torso (stand or sit upright first) |
+| `m` | mirror view on/off (on by default, like a mirror) |
+| Space | pause / resume |
+| `q`, Esc | quit |
+
+| Option | Default | Meaning |
+|---|---|---|
+| `--model` | `logs/pose_stage1T1/pose_stage1T1` | Trained model; its `_vecnormalize.pkl` must sit next to it |
+| `--camera`, `--video`, `--loop` | 0 | Webcam index, or a video file (optionally looped) |
+| `--complexity` | 1 | MediaPipe model: 0 fastest, 2 most accurate |
+| `--min-visibility` | 0.5 | How sure MediaPipe must be about a landmark before it is used |
+| `--acquire` | 8 | Camera frames with a torso before the robot resets into your pose |
+| `--hold` | 2.0 | Seconds to hold the last pose after losing you |
+| `--smooth` | 0.08 | Smoothing of the reference pose (time constant, s): higher is steadier but lags more |
+| `--no-level` | off | Assume the camera is level instead of levelling from your torso |
+| `--no-filter` | off | Turn off the One-Euro filter that removes landmark jitter |
+| `--record` | none | Start recording at once, to this `.mp4` |
+| `--record-view` | `window` | What recordings show: `window` (everything), `panels` (camera and robot, no status text), `robot` or `camera` |
+| `--record-dir` | `recordings` | Folder for recordings started with `v` |
+| `--record-fps` | 30 | Frame rate of recordings |
+
+#### Recording videos
+
+Press `v` to start recording and `v` again to stop. Each recording is saved as `recordings/live_<date>-<time>.mp4`, and you can make as many as you like in one session. `--record live.mp4` starts recording straight away to that file. A recording still running when you quit is saved.
+
+- **Real-time playback:** recordings always play at real speed, even if the window draws fewer frames than the video's frame rate.
+- **What's in the video:** a red REC timer shows in the window while recording, but isn't in the video. `--record-view` chooses what the video shows: for example, `robot` for just the robot (480 × 480 by default), or `panels` for both panels without the status text.
+- **Format:** videos are MPEG-4 (`mp4v`), which plays in VLC and most video players. For a web page, or to make a GIF for the README, convert with ffmpeg:
+
+```bash
+ffmpeg -i recordings/live_20261104-101500.mp4 -c:v libx264 -pix_fmt yuv420p -movflags +faststart live_web.mp4
+ffmpeg -i recordings/live_20261104-101500.mp4 -vf "fps=12,scale=640:-1:flags=lanczos" live.gif
+```
+
+#### How it works
+
+Each camera frame goes through these steps:
+
+1. **MediaPipe** gives 33 body landmarks in metres (`pose_world_landmarks`).
+2. **`HumanToRobot`** (`G1_tele/motion/human.py`) turns them into the 12 keypoints the policy was trained on. Each limb keeps your direction but gets the robot's length, and the feet are put on the floor. A foot within a few centimetres of the floor counts as planted and is put exactly on it, so landmark noise doesn't make it look lifted.
+3. **A One-Euro filter** (`KeypointFilter`) removes jitter: strong smoothing while you hold still, little while you move fast.
+4. **`KeypointRetargeter`** (inverse kinematics, about 2 ms) turns the keypoints into a full robot pose.
+5. **`LivePoseTrackingEnv`** moves its reference smoothly towards that pose at 50 Hz, with joint speeds limited to 3 rad/s like the training motions.
+6. **The policy** acts exactly as in training.
+
+`Teleop` (`G1_tele/teleop.py`) holds the find / follow / hold logic. It has no camera or display code, so you can drive it from any source of landmarks:
+
+```python
+from G1_tele.envs.live import LivePoseTrackingEnv
+from G1_tele.teleop import Teleop
+
+env = LivePoseTrackingEnv()
+teleop = Teleop(env, policy, kin=env.kin)        # policy: obs -> action
+teleop.on_pose(world_landmarks, visibility, t)   # every camera frame (t in seconds); (None, None) if nobody is found
+info = teleop.step()                             # 50 times a second; info["state"] is waiting / tracking / holding
+```
+
+The policy was trained on synthetic motions, and people move faster and less evenly. Expect it to stay up on arm, torso and gentle whole-body movement, and to fall more on one-leg balancing and stepping. Stage 2, with pushes and sensor noise, should help.
+
+### Record your own motions (`record_motion.py`)
+
+Records motion data from a webcam by itself, with nothing to press. Only poses are saved: no images or video.
+
+```bash
+python examples/RL/record_motion.py --name lab_day1                   # -> src/G1_tele/assets/motions/human/lab_day1/
+python examples/RL/record_motion.py --name desk --parts upper         # upper body only; the legs stay standing
+python examples/RL/record_motion.py --name lab --no-window --stop-after 60     # no display, stop after an hour
+python examples/RL/record_motion.py --name dance --video dance.mp4    # a video file instead of the webcam
+```
+
+**How it records:**
+
+- **Slots:** whenever every body point it needs is visible, frames go into the current *slot*. With `--parts full` that is shoulders, elbows, wrists, hips, knees and ankles.
+- **Losing you:** when the person is lost for longer than `--max-gap` (0.15 s), the slot ends. A needed point going missing, or nobody being found, both count; shorter flickers are bridged.
+- **Keep or throw away:** a slot that lasted at least `--min-seconds` (2 s) is cleaned and saved. Anything shorter is thrown away as noise.
+- **Long stretches:** slots longer than `--max-slot` (60 s) are saved in pieces, so a long session is written as it goes.
+
+Cleaning and saving run in a separate process, so recording never pauses. If that process dies, a new one is started; if a slot still can't be cleaned, its raw points are kept for `--reprocess`.
+
+The window shows the camera with a status line: the current slot's length, which body points are missing (in red), and how much has been saved. Space pauses (the current slot is saved), `m` mirrors the view, and `q` quits. With `--no-window`, progress is printed every 10 s and Ctrl-C stops; the current slot is saved either way.
+
+**Files.** Each slot gets two files in `src/G1_tele/assets/motions/human/<name>/`. Running again with the same `--name` adds new slots.
+
+| File | What it holds |
+|---|---|
+| `slot_0001.npz` | Robot poses (pelvis position and orientation + 29 joint angles at 50 Hz, kind `human`): the training data. Absent if cleaning rejected the whole slot. |
+| `slot_0001_raw.npz` | The MediaPipe body points of the slot (33 points with a confidence each, per frame), so it can be cleaned again without recording again. `--no-raw` skips these. |
+
+**What is never saved.** The cleaning is in `G1_tele/motion/recording.py`.
+
+- **Missing body points:** frames where a needed body point is missing or unsure.
+- **Glitches:** frames where MediaPipe throws a point away for a frame or two.
+- **Impossible poses:** poses the robot can't reach, and joints that would have to move implausibly fast.
+
+A clip never spans a gap, so saved motions have no jumps. Clips are resampled to 50 Hz and smoothed without delay, and the facing direction is smoothed too, so hip jitter doesn't turn the pose. The camera's tilt is worked out from the person's average posture over the session (people are upright most of the time), so nobody has to stand still for a calibration.
+
+To clean a folder again with other settings, for example to keep shorter slots:
+
+```bash
+python examples/RL/record_motion.py --reprocess src/G1_tele/assets/motions/human/lab_day1 --min-seconds 1.5
+```
+
+| Option | Default | Meaning |
+|---|---|---|
+| `--parts` | `full` | `full` body, or `upper` (legs kept standing) |
+| `--min-seconds` | 2.0 | Shortest slot (and clip) kept; shorter is noise |
+| `--max-gap` | 0.15 s | How long body points may be lost before a slot ends; shorter holes are filled in |
+| `--max-slot` | 60 s | Save long slots in pieces of this length |
+| `--stop-after` | none | Stop after this many minutes |
+| `--no-window`, `--no-raw` | off | No display; don't keep the raw body points |
+| `--complexity` | 2 | MediaPipe model (2 = most accurate) |
+| `--min-visibility` | 0.5 | How sure MediaPipe must be of a body point |
+| `--max-spike`, `--max-speed` | 0.08 m, 6 m/s | Glitch limits |
+| `--max-ik-err`, `--max-joint-speed` | 0.06 m, 12 rad/s | Reachability and speed limits |
+| `--smooth` | 0.04 s | Smoothing |
+
+**Tips for recording:**
+
+- **Lighting and framing:** use good light and keep your whole body in the picture for `--parts full`.
+- **Variety:** a few minutes of varied movement train better than one long repetition.
+- **Feet:** the robot is only 1.3 m tall, so keep your feet under you. Big lunges or kicks may be dropped as unreachable.
+
+### Fine-tune on new motions (`finetune.py`)
+
+Keeps training a trained policy on new motions, such as your recordings. It is the normal training pipeline: the same environment, network, PPO settings, logs, evaluation videos and checkpoints.
+
+```bash
+# first, check the mix and see how the current policy does on your clips (no training)
+python examples/RL/finetune.py --from logs/pose_stage1T1/pose_stage1T1 --name pose_human1 \
+    --motions src/G1_tele/assets/motions/human --dry-run
+
+python examples/RL/finetune.py --from logs/pose_stage1T1/pose_stage1T1 --name pose_human1 \
+    --motions src/G1_tele/assets/motions/human
+
+# then try the result live
+python examples/RL/live_pose.py --model logs/pose_human1/pose_human1
+```
+
+- **`--from`:** the model to start from, with its `_vecnormalize.pkl` next to it. Training continues from its weights and its observation statistics.
+- **`--name`:** the new run. Everything goes to `logs/<name>/`.
+- **`--motions`:** `.npz` files, folders (searched recursively; `_raw.npz` files are skipped) or patterns.
+
+**Mixing in the synthetic library.** Unless you pass `--no-synthetic`, your motions are mixed with the synthetic library so the policy doesn't forget what it already knows. 60 % of episodes (`--new-share`) start on one of your clips, and the rest are spread evenly over the four synthetic kinds. The mix is printed at the start.
+
+**Training settings.** There is no curriculum, and the learning rate is stage 2's smaller one (5e-5 falling to 1e-5; change it with `--lr`). `--robust` adds stage 2's pushes, friction changes and sensor noise.
+
+**Following progress.** The evaluation runs your clips too. `eval/survival_human` in `progress.csv` (and `eval.csv`) shows how well the policy follows them. The synthetic kinds' columns show whether it is forgetting anything.
+
+| Option | Default | Meaning |
+|---|---|---|
+| `--steps` | 10M | Training steps (`10M`, `500k`, ...) |
+| `--new-share` | 0.6 | Share of episodes on your clips |
+| `--no-synthetic` | off | Train on your motions only |
+| `--robust` | off | Add pushes, friction changes and sensor noise |
+| `--lr START END` | 5e-5 1e-5 | Learning rate, falling linearly |
+| `--n-envs` | 16 | Parallel environments |
+| `--eval-episodes` | 2 | Evaluation episodes per motion kind |
+| `--dry-run` | off | Show the mix and test the starting policy on your clips, then stop |
+
+Motion files must be 50 Hz, like `synthetic.npz`; `record_motion.py` and `make_motions.py` both write 50 Hz.
 
 ### Train a policy (`train_pose_tracking.py`)
 
@@ -136,12 +350,19 @@ python examples/RL/train_pose_tracking.py <mode>
 | `video` | Tests which OpenGL backend can render, tests the video writers and records a test clip. |
 | `train` | **Stage 1**: 60 M steps on the motion library, written to `logs/pose_stage1/`. |
 | `train2` | **Stage 2**: 40 M more steps starting from the end of stage 1, with pushes on the pelvis (up to 60 N), floor friction varied from 0.6 to 1.3 times normal, and sensor noise. Written to `logs/pose_stage2/`. |
-| `play [model]` | Watches stage 1's final model, or any model or checkpoint you give it. |
+| `play [model]` | Watches the model your stage 1 run saved (`logs/pose_stage1/pose_stage1`), or any model or checkpoint you give it, such as `logs/pose_stage1T1/pose_stage1T1`. |
 | `play2 [model]` | The same for stage 2. |
 
 - **Run time:** stage 1 took about 10.4 hours on our machine with 16 environments in parallel (about 1,600 steps per second). Set `N_ENVS` to about the number of CPU cores you have.
 - **Stopping early:** Ctrl-C stops training safely. The current model is saved and one last evaluation is recorded.
-- **Stage 2's starting point:** stage 2 starts from `logs/pose_stage1/pose_stage1.zip`, the final stage 1 model, which only exists once stage 1 has finished or been stopped. The repository includes only the 30 % checkpoint.
+- **Stage 2's starting point:** stage 2 starts from `logs/pose_stage1/pose_stage1.zip` and its `_vecnormalize.pkl`, which your own stage 1 run writes when it finishes or is stopped. To start stage 2 from the model in the repository instead, copy it there under that name:
+
+  ```bash
+  cp logs/pose_stage1T1/pose_stage1T1.zip logs/pose_stage1/pose_stage1.zip
+  cp logs/pose_stage1T1/pose_stage1T1_vecnormalize.pkl logs/pose_stage1/pose_stage1_vecnormalize.pkl
+  ```
+
+  The curriculum then starts again from `upper` and `whole`, and unlocks `balance` and `step` once enough training episodes show the policy surviving them.
 - **Old runs are never overwritten:** if `logs/<run>/` already has files, it is renamed to `logs/<run>_<date-time>/` before the new run starts. This includes the `logs/pose_stage1/` folder that ships with the repository.
 
 #### How training works
@@ -215,7 +436,7 @@ The evaluation columns are only filled in on rows where an evaluation ran (every
 
 ```python
 from train_pose_tracking import visualise, STAGE1
-visualise(STAGE1, "logs/pose_stage1/checkpoints/pose_stage1_030pct_18.0M")
+visualise(STAGE1, "logs/pose_stage1T1/pose_stage1T1")
 ```
 
 ### Make GIFs of checkpoints (`gif_maker.py`)
@@ -306,6 +527,7 @@ Importing `G1_tele` registers the environments with Gymnasium:
 | Id | What it is |
 |---|---|
 | `G1-pose-tracking` | Whole-body pose tracking (the environment trained above) |
+| `G1-pose-live` | The same, following a reference you set while it runs (`set_target()`); used by `live_pose.py` |
 | `G1-walker` | The 12 leg motors only, with no reward; used by `keyboard_control.py` |
 
 ```python
@@ -368,7 +590,7 @@ import G1_tele
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 
-ckpt = "logs/pose_stage1/checkpoints/pose_stage1_030pct_18.0M"
+ckpt = "logs/pose_stage1T1/pose_stage1T1"
 venv = VecNormalize.load(ckpt + "_vecnormalize.pkl", DummyVecEnv([lambda: gym.make("G1-pose-tracking")]))
 venv.training, venv.norm_reward = False, False   # use the saved statistics, don't update them
 model = PPO.load(ckpt, device="cpu")
@@ -391,23 +613,30 @@ The environment options must match the ones the model was trained with. `train_p
 
 **`ImportError: cannot import name ... from 'run_logging'`.** Python picked up an older `run_logging.py`. Make sure `train_pose_tracking.py`, `run_logging.py` and `gif_maker.py` are the versions in `examples/RL/` and sit in the same folder.
 
+**`live_pose.py`: "could not open camera 0".** Try `--camera 1` (or 2). On macOS, allow camera access for your terminal in System Settings → Privacy & Security → Camera.
+
+**`live_pose.py`: the robot never starts copying.** The status line says `WAITING` until both shoulders and hips are found. Step back so your hips are in the picture, or lower `--min-visibility` to 0.3.
+
+**`live_pose.py` runs below real time** (the status line shows `sim` under 1.00x). Use `--complexity 0` for a faster MediaPipe model, or `--size 360` for a smaller window.
+
 **macOS: the viewer doesn't open.** MuJoCo's viewer needs `mjpython` on macOS. Run `play` and `keyboard_control.py` with `mjpython` instead of `python`. EGL isn't available on macOS, so videos use `glfw`.
 
 **`FileNotFoundError` for robot files or motions.** The package was installed without `-e`. Run `pip install -e .` from the repository root.
 
-## Older scripts
+## Other files
 
-These scripts are from earlier experiments. They are not part of the G1 pipeline above and may not run as they are:
+These aren't part of the G1 pipeline above:
 
-| Script | What it was |
+| File | What it is |
 |---|---|
-| `examples/hand_tracking.py`, `examples/recorder.py` | First G1 attempt: Unitree's walking policy on the legs and a second policy for the arms. It needs `G1_tele/envs/hand_tracking.py`, which isn't in the repository, so it doesn't run at the moment. |
-| `examples/RL_pose_train.py`, `examples/play_RL.py`, `examples/record_RL.py` | Earlier Unitree H1 experiments using `sim/`. They have hard-coded paths to a `Robots/` folder that is no longer in the repository. |
-| `models/ppo/` | Checkpoints from those H1 runs. |
+| `logs/plotter.py` | Plots `rollout/ep_rew_mean` for every `.csv` under `logs/`, one panel per run. Set `root_dir` at the top of the file to your `logs/` folder first. |
+| `models/ppo/` | Checkpoints from the earlier Unitree H1 experiments. The code that trained them has been removed. |
+| `G1-hand-tracking`, `G1_tele/policies/hand_tracking.py` | Left over from the first G1 attempt (the walking policy on the legs, a second policy for the arms). The environment id is still registered, but its module `G1_tele/envs/hand_tracking.py` isn't in the repository, so `gym.make("G1-hand-tracking")` fails. |
+| `examples/conversion_example.py`, `pose/` | Pose extraction from videos; see [Pose detection](#pose-detection). |
 
 ## Pose detection
 
-The `pose/` folder turns video into body keypoints with MediaPipe. It will be documented here later, along with connecting a live tracker to the trained policy.
+The webcam demo above uses MediaPipe directly. The `pose/` folder holds the earlier pose-extraction tools (`PoseExtractor`, joint angles and plots) and will be documented here later.
 
 ## Built on
 
