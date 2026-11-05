@@ -5,7 +5,8 @@ examples/RL/live_pose.py  -  the simulated G1 copies the person in front of your
     python examples/RL/live_pose.py --camera 1               # another camera
     python examples/RL/live_pose.py --video clip.mp4 --loop  # a video file instead of a webcam
     python examples/RL/live_pose.py --model logs/pose_stage1/checkpoints/pose_stage1_030pct_18.0M
-    python examples/RL/live_pose.py --record live.mp4        # also save what the window shows
+    python examples/RL/live_pose.py --record live.mp4        # record from the start (or press v any time)
+    python examples/RL/live_pose.py --record-view robot      # what recordings contain: window, panels, robot, camera
 
 MediaPipe Pose finds the person in each camera frame. Once their torso (shoulders and hips) has been
 visible for a few frames, the simulated robot is reset into their pose and the trained policy starts
@@ -18,6 +19,7 @@ Stand or sit upright when you first step in: "up" is taken from your torso at th
 corrects a tilted camera. Press c to redo it.
 
 Keys (click the window first):
+    v        start / stop recording a video (saved to recordings/ unless --record names the file)
     r        reset the robot into your pose now
     c        re-level the camera from your torso (stand or sit upright)
     m        mirror view on/off
@@ -27,6 +29,7 @@ Keys (click the window first):
 Needs: pip install mediapipe==0.10.14 (see the README). Runs on the CPU; a display is needed for the window.
 """
 import argparse
+import datetime
 import os
 import pickle
 import threading
@@ -164,7 +167,8 @@ class RobotView:
         self.renderer.close()
 
 
-def compose(cam_frame, robot, mirror, lines):
+def panels(cam_frame, robot, mirror):
+    """Camera and robot images at the same height, mirrored if asked: (camera, robot)."""
     h = robot.shape[0]
     if mirror:
         robot = robot[:, ::-1]
@@ -175,11 +179,50 @@ def compose(cam_frame, robot, mirror, lines):
         cam = cv2.resize(cam_frame, (int(cam_frame.shape[1] * h / cam_frame.shape[0]), h))
         if mirror:
             cam = cam[:, ::-1]
-    img = np.ascontiguousarray(np.hstack([cam, robot]))
-    bar = np.zeros((26 * len(lines) + 10, img.shape[1], 3), np.uint8)
+    return np.ascontiguousarray(cam), np.ascontiguousarray(robot)
+
+
+def status_bar(lines, width):
+    bar = np.zeros((26 * len(lines) + 10, width, 3), np.uint8)
     for i, (text, colour) in enumerate(lines):
         cv2.putText(bar, text, (10, 24 + 26 * i), cv2.FONT_HERSHEY_SIMPLEX, 0.6, colour, 1, cv2.LINE_AA)
-    return np.vstack([bar, img])
+    return bar
+
+
+class Recorder:
+    """Writes frames to an .mp4 at a steady frame rate: frames are repeated when the window draws more
+    slowly, so the video always plays at real speed. The frame size is fixed by the first frame."""
+
+    def __init__(self, path, fps=30):
+        self.path, self.fps = str(path), int(fps)
+        self.writer, self.size, self.t0, self.n = None, None, None, 0
+
+    def add(self, img, now):
+        if self.writer is None:
+            os.makedirs(os.path.dirname(os.path.abspath(self.path)), exist_ok=True)
+            self.size = (img.shape[1] // 2 * 2, img.shape[0] // 2 * 2)          # even sizes suit every codec
+            self.writer = cv2.VideoWriter(self.path, cv2.VideoWriter_fourcc(*"mp4v"), self.fps, self.size)
+            if not self.writer.isOpened():
+                raise SystemExit(f"could not open {self.path} for writing")
+            self.t0 = now
+        if (img.shape[1], img.shape[0]) != self.size:
+            img = cv2.resize(img, self.size)
+        due = int((now - self.t0) * self.fps) + 1 - self.n
+        for _ in range(max(0, min(due, 2 * self.fps))):      # catch up, but not after a long stall
+            self.writer.write(img)
+            self.n += 1
+
+    @property
+    def seconds(self):
+        return self.n / self.fps
+
+    def close(self):
+        if self.writer is not None:
+            self.writer.release()
+            print(f"saved {self.path} ({self.seconds:.1f} s)")
+        else:
+            print(f"nothing recorded to {self.path} (the camera hadn't started)")
+        self.writer = None
 
 
 # ------------------------------------------------------------------ main
@@ -204,7 +247,12 @@ def main():
     ap.add_argument("--com-weight", type=float, default=0.0,
                     help="retargeting: pull the reference's centre of mass over the feet (0 = off)")
     ap.add_argument("--size", type=int, default=480, help="height of the window panels in pixels")
-    ap.add_argument("--record", default=None, help="also write the window to this .mp4")
+    ap.add_argument("--record", default=None, help="start recording at once, to this .mp4 (or press v any time)")
+    ap.add_argument("--record-view", default="window", choices=("window", "panels", "robot", "camera"),
+                    help="what a recording shows: the whole window, both panels without the status text, "
+                         "or one panel")
+    ap.add_argument("--record-dir", default="recordings", help="folder for recordings started with v")
+    ap.add_argument("--record-fps", type=int, default=30, help="frame rate of recordings")
     ap.add_argument("--no-mirror", action="store_true", help="show the camera unmirrored")
     a = ap.parse_args()
 
@@ -223,8 +271,15 @@ def main():
                         width=a.cam_width, height=a.cam_height)
     camera.start()
     view = RobotView(env, height=a.size, width=a.size)
-    writer, mirror, paused = None, not a.no_mirror, False
-    print("running - click the window, then: r reset to you, c re-level, m mirror, space pause, q quit")
+    mirror, paused = not a.no_mirror, False
+    recorder = Recorder(a.record, a.record_fps) if a.record else None
+
+    def new_recording():
+        stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+        return Recorder(os.path.join(a.record_dir, f"live_{stamp}.mp4"), a.record_fps)
+    if recorder:
+        print(f"recording to {recorder.path}")
+    print("running - click the window, then: v record, r reset to you, c re-level, m mirror, space pause, q quit")
 
     dt = env.dt
     t0, steps, last_n, last_draw = time.perf_counter(), 0, 0, 0.0
@@ -266,17 +321,30 @@ def main():
             lines = [(f"{state.upper()}   resets {teleop.resets}   falls {teleop.falls}   "
                       f"pose error {100 * info.get('kp_err', np.nan):.1f} cm   "
                       f"camera {camera.fps:.0f} fps   sim {sim_rate:.2f}x real time", colour),
-                     (f"copying: {limbs}      r reset   c level   m mirror   space pause   q quit", (200, 200, 200))]
-            img = compose(det["frame"] if det else None, view.render(), mirror, lines)
-            if a.record:
-                if writer is None:
-                    writer = cv2.VideoWriter(a.record, cv2.VideoWriter_fourcc(*"mp4v"), 30, (img.shape[1], img.shape[0]))
-                writer.write(img)
+                     (f"copying: {limbs}      v record   r reset   c level   m mirror   space pause   q quit",
+                      (200, 200, 200))]
+            cam_img, robot_img = panels(det["frame"] if det else None, view.render(), mirror)
+            both = np.hstack([cam_img, robot_img])
+            img = np.vstack([status_bar(lines, both.shape[1]), both])
+            if recorder is not None:
+                if det is not None:                                    # start once the camera is running
+                    recorder.add({"window": img, "panels": both, "robot": robot_img, "camera": cam_img}[a.record_view],
+                                 now)
+                rec = f"REC {int(recorder.seconds) // 60:02d}:{int(recorder.seconds) % 60:02d}"   # shown, not recorded
+                cv2.circle(img, (img.shape[1] - 118, 18), 7, (40, 40, 230), -1)
+                cv2.putText(img, rec, (img.shape[1] - 104, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (40, 40, 230), 2, cv2.LINE_AA)
             cv2.imshow("pose to humanoid", img)
             key = cv2.waitKey(1) & 0xFF
             if key in (ord("q"), 27):
                 break
-            if key == ord("r"):
+            if key == ord("v"):
+                if recorder is None:
+                    recorder = new_recording()
+                    print(f"recording to {recorder.path} - press v again to stop")
+                else:
+                    recorder.close()
+                    recorder = None
+            elif key == ord("r"):
                 print("reset to you" if teleop.reset_to_person() else "nobody in view: back to standing")
             elif key == ord("c"):
                 deg = teleop.recalibrate()
@@ -291,9 +359,8 @@ def main():
     finally:
         camera.stop()
         view.close()
-        if writer is not None:
-            writer.release()
-            print(f"saved {a.record}")
+        if recorder is not None:
+            recorder.close()
         cv2.destroyAllWindows()
 
 

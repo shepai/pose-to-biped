@@ -120,8 +120,14 @@ class HumanToRobot:
         self.planted = {"left_foot": True, "right_foot": True}
 
     # ------------------------------------------------------------------ conversion
-    def __call__(self, world_landmarks, visibility):
-        W = (np.asarray(world_landmarks, float) @ MP_TO_UP.T) @ self.R_level.T
+    def levelled(self, world_landmarks):
+        """Landmarks in the levelled camera frame (x right, y away from the camera, z up)."""
+        return (np.asarray(world_landmarks, float) @ MP_TO_UP.T) @ self.R_level.T
+
+    def __call__(self, world_landmarks, visibility, left=None):
+        """left: optional direction of the person's left in the levelled camera frame (e.g. smoothed
+        over time); by default it is taken from the hips in this frame."""
+        W = self.levelled(world_landmarks)
         v = np.asarray(visibility, float)
         P0, L = self.P0, self.length
 
@@ -132,8 +138,9 @@ class HumanToRobot:
             return all(v[LM[n]] >= self.min_visibility for n in names)
 
         hip_mid = (lm("left_hip") + lm("right_hip")) / 2
-        left = (lm("left_hip") - lm("right_hip")) if seen("left_hip", "right_hip") else \
-            (lm("left_shoulder") - lm("right_shoulder"))
+        if left is None:
+            left = (lm("left_hip") - lm("right_hip")) if seen("left_hip", "right_hip") else \
+                (lm("left_shoulder") - lm("right_shoulder"))
         left = np.array([left[0], left[1], 0.0])
         H = _frame([0, 0, 1], left)                          # the person's heading frame (camera levelled)
 

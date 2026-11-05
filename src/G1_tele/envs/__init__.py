@@ -15,6 +15,7 @@ register(
     id="G1-pose-tracking",
     entry_point="G1_tele.envs.pose_tracking:PoseTrackingEnv",     # whole-body keypoint tracking
 )
+
 register(
     id="G1-pose-live",
     entry_point="G1_tele.envs.live:LivePoseTrackingEnv",          # pose tracking from a live reference (camera)
