@@ -27,6 +27,9 @@ def _weight(name, weights):
     return 1.0
 
 
+FLAT_FADE = 0.04       # m above contact_height over which the flat-foot hold fades out
+
+
 class KeypointRetargeter:
     """Stateful per-frame IK (warm-started from the previous frame)."""
 
@@ -60,13 +63,17 @@ class KeypointRetargeter:
             body, off = KEYPOINTS[name]
             p = np.array(p, float)
             w = _weight(name, self.weights)
-            if name in ("left_foot", "right_foot") and p[2] < ANKLE_HEIGHT + self.contact_height:
-                p[2] = max(p[2], ANKLE_HEIGHT)
+            if name in ("left_foot", "right_foot") and p[2] < ANKLE_HEIGHT + self.contact_height + FLAT_FADE:
+                # a foot near the floor is held flat; the hold fades out over FLAT_FADE above contact_height,
+                # so the ankle doesn't snap to a new angle the moment the foot crosses that height
+                fade = np.clip((ANKLE_HEIGHT + self.contact_height + FLAT_FADE - p[2]) / FLAT_FADE, 0.0, 1.0)
                 bid = k.m.body(body).id
                 k.forward(self.q)
                 yaw = np.arctan2(k.d.xmat[bid].reshape(3, 3)[1, 0], k.d.xmat[bid].reshape(3, 3)[0, 0])
-                tasks.append({"type": "orient", "body": bid, "target": rot_z(yaw), "w": 10.0})
-                feet_down.append(p[:2])
+                tasks.append({"type": "orient", "body": bid, "target": rot_z(yaw), "w": 10.0 * fade})
+                if p[2] < ANKLE_HEIGHT + self.contact_height:
+                    p[2] = max(p[2], ANKLE_HEIGHT)
+                    feet_down.append(p[:2])
             tasks.append({"type": "point", "body": k.m.body(body).id, "offset": np.array(off, float),
                           "target": p, "w": w})
         if self.com_weight > 0 and feet_down:

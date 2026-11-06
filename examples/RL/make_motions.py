@@ -4,6 +4,9 @@ Build motion libraries for the pose-tracking env.
     # synthetic, balanced whole-body motions (default output: G1_tele/assets/motions/synthetic.npz)
     python make_motions.py synth --clips-per-kind 30 --seconds 20
 
+    # walking and turning (kinds turn, walk, loco; default output: G1_tele/assets/motions/locomotion.npz)
+    python make_motions.py loco --clips-per-kind 30 --seconds 20
+
     # your old hands.npy (T,2,3 hand-relative-to-shoulder) -> full-body reference clips
     python make_motions.py hands /path/to/hands.npy --fps 30 --out my_hands.npz
 
@@ -21,7 +24,8 @@ import time
 import numpy as np
 
 from G1_tele.motion.kinematics import G1Kinematics
-from G1_tele.motion.library import DEFAULT_MOTIONS, merge_libraries, save_library
+from G1_tele.motion.gait import LOCO_KINDS, GaitGenerator
+from G1_tele.motion.library import DEFAULT_MOTIONS, LOCO_MOTIONS, merge_libraries, save_library
 from G1_tele.motion.retarget import hands_relative_to_shoulders, resample, retarget_clip
 from G1_tele.motion.synthetic import SyntheticMotionGenerator
 
@@ -38,6 +42,13 @@ def main():
     s.add_argument("--seconds", type=float, default=20.0)
     s.add_argument("--seed", type=int, default=0)
     s.add_argument("--xml", default=None)
+    lo = sub.add_parser("loco")
+    lo.add_argument("--out", default=str(LOCO_MOTIONS))
+    lo.add_argument("--kinds", default=",".join(LOCO_KINDS))
+    lo.add_argument("--clips-per-kind", type=int, default=30)
+    lo.add_argument("--seconds", type=float, default=20.0)
+    lo.add_argument("--seed", type=int, default=0)
+    lo.add_argument("--xml", default=None)
     for name in ("hands", "keypoints"):
         h = sub.add_parser(name)
         h.add_argument("path")
@@ -59,6 +70,11 @@ def main():
         gen = SyntheticMotionGenerator(kin, fps=FPS, seed=a.seed)
         clips, names, kinds = gen.library(a.kinds.split(","), a.clips_per_kind, a.seconds)
         save_library(a.out, clips, FPS, names, kinds)
+    elif a.cmd == "loco":
+        gen = GaitGenerator(kin, fps=FPS, seed=a.seed)
+        clips, names, kinds = gen.library(a.kinds.split(","), a.clips_per_kind, a.seconds)
+        save_library(a.out, clips, FPS, names, kinds)
+        print(f"{gen.stats['clips']} clips from {gen.stats['attempts']} attempts")
     else:
         raw = np.load(a.path, allow_pickle=True)
         if a.cmd == "hands":

@@ -120,7 +120,9 @@ class TrackingStatsCallback(BaseCallback):
     track/end_fell and track/end_lost split early episode ends into falls and lost tracking."""
 
     KEYS = {"kp": "kp_err", "hand": "hand_err", "foot": "foot_err", "assist": "assist", "cp": "cp_margin",
-            "contact": "contact_match", "r_bal": "r_balance", "r_trk": "r_track"}
+            "contact": "contact_match", "r_bal": "r_balance", "r_trk": "r_track",
+            # locomotion=True only (logged when present)
+            "vel": "vel_err", "wz": "yaw_rate_err", "root": "root_err", "yaw": "yaw_err", "speed": "ref_speed"}
 
     def __init__(self, dt=0.02):
         super().__init__()
@@ -129,6 +131,7 @@ class TrackingStatsCallback(BaseCallback):
     def _on_rollout_start(self):
         self.buf = {k: [] for k in list(self.KEYS) + ["rew"]}
         self.ep_len, self.fell, self.lost, self.eps = [], 0, 0, 0
+        self.off_course = 0
 
     def _on_step(self):
         infos, dones = self.locals["infos"], self.locals["dones"]
@@ -142,6 +145,7 @@ class TrackingStatsCallback(BaseCallback):
                 self.eps += 1
                 self.fell += int(bool(info.get("fell", False)))
                 self.lost += int(bool(info.get("lost", False)) and not info.get("fell", False))
+                self.off_course += int(bool(info.get("off_course", False)) and not info.get("fell", False))
                 if "episode" in info:
                     self.ep_len.append(info["episode"]["l"])
         return True
@@ -158,10 +162,19 @@ class TrackingStatsCallback(BaseCallback):
         rec("track/cp_margin_cm", 100 * m("cp"))
         rec("track/contact_match", m("contact"))
         rec("track/assist", m("assist"))
+        loco = np.isfinite(m("vel"))
+        if loco:                                            # locomotion=True runs
+            rec("track/vel_err_m_s", m("vel"))
+            rec("track/yaw_rate_err", m("wz"))
+            rec("track/root_err_cm", 100 * m("root"))
+            rec("track/yaw_err_deg", float(np.degrees(m("yaw"))))
+            rec("track/ref_speed_m_s", m("speed"))
         if self.eps:
             rec("track/fall_rate", (self.fell + self.lost) / self.eps)
             rec("track/end_fell", self.fell / self.eps)
             rec("track/end_lost", self.lost / self.eps)
+            if loco:
+                rec("track/end_off_course", self.off_course / self.eps)
         if self.ep_len:
             rec("track/ep_len_s", float(np.mean(self.ep_len)) * self.dt)
 
@@ -175,15 +188,19 @@ class CurriculumCallback(BaseCallback):
                (survival = fraction of the possible episode the robot stayed up and on track)
     Unlocked kinds are sampled with weight floor + (1 - survival): more practice where it still
     falls, but easy kinds never disappear (so they are not forgotten). State is saved to
-    <log_dir>/curriculum.json; stage 2 starts from stage 1's file."""
+    <log_dir>/curriculum.json; stage 2 starts from stage 1's file.
+    per_second=True divides each kind's weight by its total clip length, so the weights are shares of
+    episodes even when the kinds have different amounts of motion (the env samples clips in
+    proportion to their length)."""
 
     def __init__(self, log_dir, order=("upper", "whole", "balance", "step"), start=2, threshold=0.8,
-                 window=400, min_episodes=200, floor=0.3, state_from=None, verbose=1):
+                 window=400, min_episodes=200, floor=0.3, state_from=None, per_second=False, verbose=1):
         super().__init__(verbose)
         self.order, self.start_level, self.threshold = list(order), start, threshold
         self.window, self.min_eps, self.floor = window, min_episodes, floor
         self.path = os.path.join(log_dir, "curriculum.json")
         self.state_from = state_from
+        self.per_second = per_second
 
     def _on_training_start(self):
         kinds = list(self.training_env.get_attr("clip_kinds", indices=[0])[0])
@@ -192,7 +209,8 @@ class CurriculumCallback(BaseCallback):
         self.level = min(self.start_level, len(self.ladder))
         if self.state_from and os.path.exists(self.state_from):
             with open(self.state_from) as f:
-                self.level = max(self.level, int(json.load(f).get("level", 0)))
+                self.level = min(len(self.ladder), max(self.level, int(json.load(f).get("level", 0))))
+        self.seconds = dict(self.training_env.get_attr("kind_seconds", indices=[0])[0]) if self.per_second else {}
         self.hist = {k: [] for k in kinds}
         self._push_weights(announce=True)
 
@@ -209,6 +227,8 @@ class CurriculumCallback(BaseCallback):
             s = self._survival(k)
             w[k] = self.floor + (1.0 - (s if s is not None else 0.0))
         self.weights = w
+        if self.per_second:
+            w = {k: v / max(self.seconds.get(k, 1.0), 1e-6) for k, v in w.items()}
         self.training_env.env_method("set_kind_weights", w)
         with open(self.path, "w") as f:
             json.dump({"level": self.level, "unlocked": self.unlocked(), "weights": w,
@@ -325,9 +345,12 @@ class PeriodicVideoEvalCallback(_PercentCallback):
             for c in [clips[int(i)] for i in np.linspace(0, len(clips) - 1, self.per_kind)] if clips else []:
                 t0 = float(rng.uniform(0, max(0.0, lib.duration(c) - self.max_ep_s)))
                 self.episodes.append((k, c, t0))
+        self.loco = bool(getattr(self.env, "locomotion", False))
         self.fields = (["pct", "timesteps", "wall_minutes", "survival", "ep_len_s", "kp_err_cm", "hand_err_cm",
-                        "foot_err_cm"] + [f"survival_{k}" for k in self.kinds]
-                       + [f"kp_err_cm_{k}" for k in self.kinds] + ["video"])
+                        "foot_err_cm"] + (["vel_err_m_s", "root_err_cm"] if self.loco else [])
+                       + [f"survival_{k}" for k in self.kinds]
+                       + [f"kp_err_cm_{k}" for k in self.kinds]
+                       + ([f"vel_err_m_s_{k}" for k in self.kinds] if self.loco else []) + ["video"])
         if not self.render_ok:
             return
         try:
@@ -373,7 +396,7 @@ class PeriodicVideoEvalCallback(_PercentCallback):
         n_video = int(self.video_s / env.dt)
         max_steps = int(self.max_ep_s / env.dt)
         frames, filmed = [], set()
-        res = {k: {"surv": [], "len": [], "kp": [], "hand": [], "foot": []} for k in self.kinds}
+        res = {k: {"surv": [], "len": [], "kp": [], "hand": [], "foot": [], "vel": [], "root": []} for k in self.kinds}
         for i, (kind, clip, t0) in enumerate(self.episodes):
             obs, _ = env.reset(seed=10_000 + i, options={"clip": clip, "t0": t0})
             film = kind not in filmed and self.renderer is not None
@@ -384,6 +407,8 @@ class PeriodicVideoEvalCallback(_PercentCallback):
                 action, _ = model.predict(o, deterministic=True)
                 obs, _, term, trunc, info = env.step(action)
                 r["kp"].append(info["kp_err"]); r["hand"].append(info["hand_err"]); r["foot"].append(info["foot_err"])
+                if self.loco:
+                    r["vel"].append(info["vel_err"]); r["root"].append(info["root_err"])
                 if film and k < n_video and self.renderer is not None:
                     self._frame(frames)
                 if term or trunc:
@@ -415,6 +440,11 @@ class PeriodicVideoEvalCallback(_PercentCallback):
         for k in self.kinds:
             row[f"survival_{k}"] = round(float(np.mean(res[k]["surv"])), 3) if res[k]["surv"] else np.nan
             row[f"kp_err_cm_{k}"] = cm(res[k]["kp"])
+        if self.loco:
+            mean = lambda xs: round(float(np.nanmean(xs)), 3) if len(xs) else np.nan   # noqa: E731
+            row["vel_err_m_s"], row["root_err_cm"] = mean(cat("vel")), cm(cat("root"))
+            for k in self.kinds:
+                row[f"vel_err_m_s_{k}"] = mean(res[k]["vel"])
         new = not os.path.exists(self.csv_path)
         with open(self.csv_path, "a", newline="") as f:
             wr = csv.DictWriter(f, fieldnames=self.fields)
@@ -422,11 +452,12 @@ class PeriodicVideoEvalCallback(_PercentCallback):
                 wr.writeheader()
             wr.writerow(row)
         for key in ["survival", "ep_len_s", "kp_err_cm", "hand_err_cm", "foot_err_cm"] + \
-                   [f"survival_{k}" for k in self.kinds]:
+                   (["vel_err_m_s", "root_err_cm"] if self.loco else []) + [f"survival_{k}" for k in self.kinds]:
             self.logger.record(f"eval/{key}", row[key])
         per_kind = "  ".join(f"{k} {row[f'survival_{k}']:.2f}" for k in self.kinds)
+        walk = f", speed err {row['vel_err_m_s']:.2f} m/s" if self.loco else ""
         print(f"[eval {row['pct']:5.1f}%] survival {row['survival']:.2f} ({per_kind}), "
-              f"kp err {row['kp_err_cm']:.1f} cm, video: {video_col}", flush=True)
+              f"kp err {row['kp_err_cm']:.1f} cm{walk}, video: {video_col}", flush=True)
 
     def record_now(self, label_pct=None):
         """Extra evaluation outside the schedule (used for the final model, e.g. after Ctrl-C)."""

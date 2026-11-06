@@ -22,6 +22,7 @@ from G1_tele.motion.kinematics import slerp
 
 MOTION_DIR = Path(__file__).resolve().parent.parent / "assets" / "motions"
 DEFAULT_MOTIONS = MOTION_DIR / "synthetic.npz"
+LOCO_MOTIONS = MOTION_DIR / "locomotion.npz"      # walking and turning (make_motions.py loco)
 
 
 def save_library(path, clips, fps, names=None, kinds=None):

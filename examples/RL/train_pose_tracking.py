@@ -70,6 +70,17 @@ register(id=STAGE2, entry_point=ENTRY, kwargs={**COMMON, "push_force": 60.0, "fr
 
 EVAL_ID = "G1-pose-eval"
 
+# Walking + turning + pose (train_locomotion.py). Same env with locomotion=True: the reference root's
+# velocity and position are observed and rewarded, and drifting too far from it ends the episode.
+from G1_tele.motion.library import DEFAULT_MOTIONS, LOCO_MOTIONS               # noqa: E402
+LOCO_COMMON = {**COMMON, "motion_file": [str(DEFAULT_MOTIONS), str(LOCO_MOTIONS)], "locomotion": True,
+               "max_root_err": 0.5, "max_yaw_err": 0.8}
+LOCO_TRAIN, LOCO_ROBUST, LOCO_EVAL = "G1-loco-train", "G1-loco-robust", "G1-loco-eval"
+register(id=LOCO_TRAIN, entry_point=ENTRY, kwargs=dict(LOCO_COMMON))
+register(id=LOCO_EVAL, entry_point=ENTRY, kwargs=dict(LOCO_COMMON))
+register(id=LOCO_ROBUST, entry_point=ENTRY, kwargs={**LOCO_COMMON, "push_force": 60.0, "friction_range": (0.6, 1.3),
+                                                     "obs_noise": 0.01, "init_noise": 0.05})
+
 POLICY_KW = dict(net_arch=dict(pi=[512, 256, 128], vf=[512, 256, 128]), log_std_init=-1.0)
 # gamma 0.995 = ~4 s horizon at 50 Hz, so a fall 2-3 s away still matters to the policy (0.99 = ~2 s).
 # target_kl stops an update early if the policy moves too far, the usual cause of "up, then down".

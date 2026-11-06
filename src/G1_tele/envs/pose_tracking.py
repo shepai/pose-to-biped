@@ -43,9 +43,29 @@ Observation = [actor part (n_actor_obs) | privileged part (N_PRIVILEGED, only if
     robot pelvis height, reference pelvis height, reference gravity vector
     [residual] reference joints - default, reference joints - q, reference joint velocity*0.05
     [lookahead] reference keypoints (and joints) at t + each lookahead time
+    [locomotion] reference root velocity (forward, sideways, turning rate) now and at each lookahead
+                 time, and the robot's position and heading error to the reference root
 Deploying: feed the actor obs[:n_actor_obs] (the privileged tail can be zeros - the actor ignores
 it). residual=True needs reference joint angles at run time: run
 G1_tele.motion.retarget.KeypointRetargeter on the tracker keypoints (~2 ms per frame).
+
+Locomotion (locomotion=True)
+----------------------------
+Without it, everything is measured in each body's own heading frame, so the robot is never asked to
+go anywhere: a reference that walks or turns scores the same whether the robot follows or stands
+still. With locomotion=True the reference root's motion becomes part of the task:
+  * observations: the reference's root velocity in its heading frame and its turning rate (now and at
+    each lookahead time), and where the reference root is relative to the robot (position and heading
+    error, clipped to the termination limits),
+  * rewards (LOCO_REWARD_WEIGHTS): following the root velocity and turning rate, plus weaker terms
+    for the position and heading error so drift is corrected,
+  * the foot-slip penalty is measured in the world, not relative to the pelvis (walking moves the
+    pelvis over a planted foot, which the heading-frame version would punish),
+  * termination: the episode also ends ("lost") when the robot is more than max_root_err metres or
+    max_yaw_err radians away from the reference root. This is what makes ignoring the motion costly:
+    a robot that stands still on a walking clip is stopped within a couple of seconds.
+The observation grows by 6 + 3 * len(lookahead) entries, inserted after the old actor part, so a
+policy trained without locomotion can be widened to it (examples/RL/train_locomotion.py).
 """
 import numpy as np
 import mujoco
@@ -79,7 +99,19 @@ REWARD_WEIGHTS = dict(
     joint_vel=0.08,   # joint velocities
     action_rate=0.08, torque=1e-6, slip=0.05,                 # penalties
 )
-SIGMAS = dict(cp=0.04, cp_margin=0.02, tilt=0.15, height=0.05, ang_vel=1.0, joint=0.3, joint_vel=1.5)
+# With locomotion=True: alive 0.20 + balance 0.34 + pose 0.26 + root motion 0.20.
+LOCO_REWARD_WEIGHTS = dict(
+    alive=0.20,
+    cp=0.12, upright=0.08, height=0.04, ang_vel=0.04, contact=0.06,
+    kp=0.15, joint=0.07, joint_vel=0.04,
+    lin_vel=0.09,     # pelvis velocity (heading frame) matches the reference root's
+    yaw_rate=0.05,    # turning rate matches
+    root_pos=0.04,    # pelvis position on the floor matches the reference root (drift correction)
+    yaw=0.02,         # heading matches
+    action_rate=0.08, torque=1e-6, slip=0.05,
+)
+SIGMAS = dict(cp=0.04, cp_margin=0.02, tilt=0.15, height=0.05, ang_vel=1.0, joint=0.3, joint_vel=1.5,
+              lin_vel=0.2, yaw_rate=0.4, root_pos=0.25, yaw=0.3)
 
 N_PRIVILEGED = 19
 CONTACT_Z = 0.010            # a sole corner sphere (r = 5 mm) closer than this to the floor is in contact
@@ -141,7 +173,8 @@ class PoseTrackingEnv(gym.Env):
                  kind_weights=None, max_kp_err=0.30, push_force=0.0, push_interval=(2.0, 6.0),
                  friction_range=None, init_noise=0.03, obs_noise=0.0, action_scale=None,
                  sigma_kp=0.12, reward_weights=None, privileged_obs=True, gravity_ff=True,
-                 assist=0.0, assist_anneal_steps=None, render_mode=None, seed=None):
+                 assist=0.0, assist_anneal_steps=None, locomotion=False, max_root_err=0.5, max_yaw_err=0.8,
+                 render_mode=None, seed=None):
         super().__init__()
         xml_path = xml_path or XML_PATH
         self.base = G1Env(xml_path, render_mode=render_mode, max_episode_seconds=1e9)
@@ -167,10 +200,14 @@ class PoseTrackingEnv(gym.Env):
         self.episode_seconds, self.lookahead = episode_seconds, tuple(lookahead)
         self.kind_weights = dict(kind_weights) if kind_weights else None
         self.max_kp_err, self.sigma_kp = max_kp_err, sigma_kp
-        unknown = set(reward_weights or {}) - set(REWARD_WEIGHTS)
+        self.locomotion = bool(locomotion)
+        self.max_root_err, self.max_yaw_err = float(max_root_err), float(max_yaw_err)
+        self.end_off_course = True                          # LivePoseTrackingEnv turns this off (it re-anchors instead)
+        base_w = LOCO_REWARD_WEIGHTS if self.locomotion else REWARD_WEIGHTS
+        unknown = set(reward_weights or {}) - set(base_w)
         if unknown:
-            raise ValueError(f"unknown reward_weights keys {unknown}; valid: {list(REWARD_WEIGHTS)}")
-        self.w = {**REWARD_WEIGHTS, **(reward_weights or {})}
+            raise ValueError(f"unknown reward_weights keys {unknown}; valid: {list(base_w)}")
+        self.w = {**base_w, **(reward_weights or {})}
         self.push_force, self.push_interval = push_force, push_interval
         self.friction_range, self.init_noise, self.obs_noise = friction_range, init_noise, obs_noise
         self.privileged_obs = privileged_obs
@@ -194,8 +231,10 @@ class PoseTrackingEnv(gym.Env):
             raise ValueError("could not find collision geoms on the ankle_roll links (feet)")
 
         K, n = len(self.obs_kp_names), self.n_ctrl
-        self.n_actor_obs = (6 + 3 * n + 6 * K + 5 + (3 * n if residual else 0)
-                            + len(self.lookahead) * (3 * K + (n if residual else 0)))
+        self.n_pose_obs = (6 + 3 * n + 6 * K + 5 + (3 * n if residual else 0)
+                           + len(self.lookahead) * (3 * K + (n if residual else 0)))
+        self.n_loco_obs = (6 + 3 * len(self.lookahead)) if self.locomotion else 0
+        self.n_actor_obs = self.n_pose_obs + self.n_loco_obs
         n_obs = self.n_actor_obs + (N_PRIVILEGED if privileged_obs else 0)
         self.observation_space = spaces.Box(-np.inf, np.inf, (n_obs,), np.float32)
         self.action_space = spaces.Box(-1.0, 1.0, (n,), np.float32)
@@ -211,6 +250,17 @@ class PoseTrackingEnv(gym.Env):
         """Fix the balance-assist strength (0 = off) and stop the automatic annealing."""
         self.assist0, self.assist, self.assist_anneal_steps = float(value), float(value), None
 
+    @property
+    def kind_seconds(self):
+        """Seconds of usable motion (clips >= 1.5 s, the shortest the env samples) per clip kind."""
+        out = {}
+        for c in range(self.lib.n_clips):
+            d = self.lib.duration(c)
+            if d >= 1.5:
+                k = str(self.lib.kinds[c])
+                out[k] = out.get(k, 0.0) + d
+        return out
+
     # ------------------------------------------------------------ reference
     def _ref(self, t):
         """Reference state at time t: root, joints, jvel, local keypoints, height, gravity, foot contacts."""
@@ -222,8 +272,24 @@ class PoseTrackingEnv(gym.Env):
         o, R = k.heading(root[:3], root[3:7])
         kps = (k.keypoints_world(self._all_kp) - o) @ R
         contact = k.d.xpos[k.foot_ids, 2] < ANKLE_HEIGHT + 0.015
-        g = quat_to_mat(root[3:7]).T @ np.array([0.0, 0.0, -1.0])
-        return {"root": root, "joints": joints, "jvel": jvel, "kp": kps, "h": root[2], "g": g, "contact": contact}
+        Rq = quat_to_mat(root[3:7])
+        g = Rq.T @ np.array([0.0, 0.0, -1.0])
+        ref = {"root": root, "joints": joints, "jvel": jvel, "kp": kps, "h": root[2], "g": g, "contact": contact}
+        if self.locomotion:
+            lin, ang, _ = lib.velocity(c, t)
+            ref["v"] = (lin @ R)[:2]                        # root velocity in the reference's heading frame
+            ref["wz"] = float((Rq @ ang)[2])                # turning rate (world z)
+            ref["xy"] = np.asarray(root[:2], float).copy()
+            ref["yaw"] = float(yaw_of_quat(root[3:7]))
+        return ref
+
+    def _root_error(self, ref):
+        """Reference root relative to the robot: (dx, dy) in the robot's heading frame, heading error."""
+        d = self.base.d
+        yaw = yaw_of_quat(d.qpos[3:7])
+        e = (ref["xy"] - d.qpos[:2]) @ rot_z(yaw)[:2, :2]
+        dyaw = (ref["yaw"] - yaw + np.pi) % (2 * np.pi) - np.pi
+        return e, float(dyaw)
 
     def _gravity_offset(self, ref):
         """PD-target offset (tau_static / KP) that cancels gravity sag in the reference pose."""
@@ -275,11 +341,20 @@ class PoseTrackingEnv(gym.Env):
                  [b.d.qpos[2], rn["h"]], rn["g"]]
         if self.residual:
             parts += [(rn["joints"] - DEFAULT_Q)[c], (rn["joints"] - s["q"])[c], rn["jvel"][c] * 0.05]
+        ahead = []
         for dt in self.lookahead:
             r = self._ref(self.t + b.dt + dt)
+            ahead.append(r)
             parts.append(r["kp"][self._obs_sel].ravel())
             if self.residual:
                 parts.append((r["joints"] - DEFAULT_Q)[c])
+        if self.locomotion:                                 # after the pose part, so old policies can be widened
+            parts.append([rn["v"][0], rn["v"][1], rn["wz"]])
+            for r in ahead:
+                parts.append([r["v"][0], r["v"][1], r["wz"]])
+            e, dyaw = self._root_error(rn)
+            parts.append(np.clip(e, -self.max_root_err, self.max_root_err))
+            parts.append([np.clip(dyaw, -self.max_yaw_err, self.max_yaw_err)])
         obs = np.concatenate(parts).astype(np.float32)
         if self.obs_noise > 0:
             obs += self.np_random.normal(0, self.obs_noise, obs.shape).astype(np.float32)
@@ -328,6 +403,7 @@ class PoseTrackingEnv(gym.Env):
         self.last_action = np.zeros(self.n_ctrl, np.float32)
         self.robot_kp = self._robot_kp()
         self.prev_foot = self.robot_kp[self.foot_kp].copy()
+        self.prev_foot_world = self._heading_to_world(self.prev_foot)
         self.prev_com = d.subtree_com[self.pelvis_id] - np.asarray(d.qvel[:3]) * b.dt  # com_vel ~ base vel
         self._balance_state()
         self.ref_next = self._ref(self.t + b.dt)
@@ -414,23 +490,47 @@ class PoseTrackingEnv(gym.Env):
 
         # ---- penalties: planted reference feet should not slide, smooth actions, low torque
         foot = kp[self.foot_kp]
+        foot_world = self._heading_to_world(foot)
         slip = 0.0
         for i, fi in enumerate(self.foot_kp):
             if ref["kp"][fi, 2] < 0.05:
-                slip += np.sum(((foot[i, :2] - self.prev_foot[i, :2]) / b.dt) ** 2)
+                if self.locomotion:                         # in the world: the pelvis may move over the foot
+                    if bal["contact"][i]:
+                        slip += np.sum(((foot_world[i, :2] - self.prev_foot_world[i, :2]) / b.dt) ** 2)
+                else:
+                    slip += np.sum(((foot[i, :2] - self.prev_foot[i, :2]) / b.dt) ** 2)
         self.prev_foot = foot.copy()
+        self.prev_foot_world = foot_world
         p_rate = np.mean((a - self.last_action) ** 2)
         p_tau = np.sum(b.d.ctrl[b.act_adr] ** 2)
 
         r_balance = w["cp"] * r_cp + w["upright"] * r_up + w["height"] * r_h + w["ang_vel"] * r_av \
             + w["contact"] * contact_match
         r_track = w["kp"] * r_kp + w["joint"] * r_q + w["joint_vel"] * r_vel
+        loco_info, off_course = {}, False
+        if self.locomotion:                                 # ---- root motion
+            d = b.d
+            Rh = rot_z(yaw_of_quat(d.qpos[3:7]))
+            v = (d.qvel[:3] @ Rh)[:2]
+            wz = float((quat_to_mat(d.qpos[3:7]) @ d.qvel[3:6])[2])
+            e_v = float(np.linalg.norm(v - ref["v"]))
+            e_wz = abs(wz - ref["wz"])
+            e_xy, dyaw = self._root_error(ref)
+            e_p = float(np.linalg.norm(e_xy))
+            r_track += (w["lin_vel"] * np.exp(-(e_v / sg["lin_vel"]) ** 2)
+                        + w["yaw_rate"] * np.exp(-(e_wz / sg["yaw_rate"]) ** 2)
+                        + w["root_pos"] * np.exp(-(e_p / sg["root_pos"]) ** 2)
+                        + w["yaw"] * np.exp(-(dyaw / sg["yaw"]) ** 2))
+            off_course = e_p > self.max_root_err or abs(dyaw) > self.max_yaw_err
+            loco_info = {"vel_err": e_v, "yaw_rate_err": e_wz, "root_err": e_p, "yaw_err": abs(dyaw),
+                         "ref_speed": float(np.linalg.norm(ref["v"])), "off_course": off_course}
         rew = w["alive"] + r_balance + r_track - w["action_rate"] * p_rate - w["torque"] * p_tau - w["slip"] * slip
         self.last_action = a
 
         # fell: pelvis tilted > ~45 deg, or 25 cm lower than the reference; lost: pose too far off
+        # (or, with locomotion, too far from the reference root's position or heading)
         fell = bool(s["gravity"][2] > -0.7 or dh < -0.25)
-        lost = (not fell) and kp_err > self.max_kp_err
+        lost = (not fell) and (kp_err > self.max_kp_err or (off_course and self.end_off_course))
         terminated = fell or lost
         truncated = (not terminated) and self.t >= self.t_end - 1e-6
 
@@ -443,7 +543,7 @@ class PoseTrackingEnv(gym.Env):
                 "cp_margin": float(bal["margin"]), "contact_match": contact_match,
                 "r_balance": float(r_balance), "r_track": float(r_track),
                 "r_cp": float(r_cp), "r_upright": float(r_up), "r_kp": float(r_kp), "r_joint": float(r_q),
-                "fell": fell, "lost": lost, "assist": self.assist}
+                "fell": fell, "lost": lost, "assist": self.assist, **loco_info}
         if terminated or truncated:
             info["episode_kp_err"] = self.ep_stats["kp_err"] / max(1, self.ep_stats["steps"])
             info["clip_kind"] = str(self.lib.kinds[self.clip])
@@ -483,6 +583,16 @@ class PoseTrackingEnv(gym.Env):
             mujoco.mjv_initGeom(scene.geoms[scene.ngeom], mujoco.mjtGeom.mjGEOM_SPHERE,
                                 np.array([r, 0, 0]), p, np.eye(3).ravel(), np.array(rgba, np.float32))
             scene.ngeom += 1
+        if self.locomotion:                                 # where the reference root is: a green dot + heading
+            ref = self._ref(self.t)
+            x, y, yaw = ref["xy"][0], ref["xy"][1], ref["yaw"]
+            for p, rad in (((x, y, 0.01), 0.05), ((x + 0.14 * np.cos(yaw), y + 0.14 * np.sin(yaw), 0.01), 0.025)):
+                if scene.ngeom >= scene.maxgeom:
+                    break
+                mujoco.mjv_initGeom(scene.geoms[scene.ngeom], mujoco.mjtGeom.mjGEOM_SPHERE,
+                                    np.array([rad, 0, 0]), np.array(p, float), np.eye(3).ravel(),
+                                    np.array(MID_RGBA, np.float32))
+                scene.ngeom += 1
 
     def render(self):
         self.base.render()

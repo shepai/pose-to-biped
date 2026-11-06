@@ -18,6 +18,14 @@ are kept in the robot's default pose.
 Stand or sit upright when you first step in: "up" is taken from your torso at that moment, which
 corrects a tilted camera. Press c to redo it.
 
+Walking models (from train_locomotion.py) are recognised automatically: the robot then also follows
+where you are and which way you face, relative to where you were when it first saw you. Walk
+towards the camera while facing it and the robot walks forwards; step to your left and it steps to
+its left; turn and it turns (up to about side-on - beyond that MediaPipe tends to swap your left and
+right, and those frames are skipped). Your position comes from your size and place in the image, so
+give the camera's horizontal field of view with --fov if it isn't about 65 degrees, and keep your
+whole body in view. --no-walk keeps a walking model on the spot.
+
 Keys (click the window first):
     v        start / stop recording a video (saved to recordings/ unless --record names the file)
     r        reset the robot into your pose now
@@ -77,13 +85,30 @@ def load_policy(model_path):
     def act(obs):
         action, _ = model.predict(vecnorm.normalize_obs(obs), deterministic=True)
         return action
+    act.n_obs = int(model.observation_space.shape[0])
     return act
+
+
+def make_env(n_obs):
+    """The live env that matches the model: pose only, or walking (locomotion=True)."""
+    from G1_tele.envs.live import LivePoseTrackingEnv
+    env = LivePoseTrackingEnv()
+    if env.observation_space.shape[0] == n_obs:
+        return env, False
+    sizes = [env.observation_space.shape[0]]
+    env.close()
+    env = LivePoseTrackingEnv(locomotion=True)
+    if env.observation_space.shape[0] == n_obs:
+        return env, True
+    raise SystemExit(f"the model expects {n_obs} observations, but the live env has {sizes[0]} (pose) or "
+                     f"{env.observation_space.shape[0]} (walking): was it trained with other env settings?")
 
 
 # ------------------------------------------------------------------ camera + MediaPipe, in a thread
 class PoseCamera(threading.Thread):
     """Reads frames and runs MediaPipe Pose as fast as the camera allows; the newest result is in
-    .latest: dict(n, frame (BGR, skeleton drawn), world (33,3) or None, vis (33,) or None, t (s))."""
+    .latest: dict(n, frame (BGR, skeleton drawn), world (33,3) or None, vis (33,) or None,
+    image (33,2) or None (landmarks in the image, 0-1), aspect (width / height), t (s))."""
 
     def __init__(self, source, loop=False, complexity=1, width=None, height=None):
         super().__init__(daemon=True)
@@ -119,16 +144,18 @@ class PoseCamera(threading.Thread):
                 self.ended = True
                 break
             res = pose.process(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-            world = vis = None
+            world = vis = image = None
             if res.pose_world_landmarks is not None and res.pose_landmarks is not None:
                 world = np.array([[p.x, p.y, p.z] for p in res.pose_world_landmarks.landmark])
                 vis = np.array([p.visibility for p in res.pose_landmarks.landmark])
+                image = np.array([[p.x, p.y] for p in res.pose_landmarks.landmark])
                 draw.draw_landmarks(frame, res.pose_landmarks, mp_pose.POSE_CONNECTIONS)
             n += 1
             now = time.perf_counter()
             self.fps = 0.9 * self.fps + 0.1 / max(now - t_prev, 1e-3)
             t_prev = now
-            self.latest = {"n": n, "frame": frame, "world": world, "vis": vis, "t": now}
+            self.latest = {"n": n, "frame": frame, "world": world, "vis": vis, "image": image,
+                           "aspect": frame.shape[1] / frame.shape[0], "t": now}
             if self.is_file:                                 # play files at their own speed
                 t_next += 1.0 / self.file_fps
                 time.sleep(max(0.0, t_next - time.perf_counter()))
@@ -254,19 +281,24 @@ def main():
     ap.add_argument("--record-dir", default="recordings", help="folder for recordings started with v")
     ap.add_argument("--record-fps", type=int, default=30, help="frame rate of recordings")
     ap.add_argument("--no-mirror", action="store_true", help="show the camera unmirrored")
+    ap.add_argument("--fov", type=float, default=65.0,
+                    help="the camera's horizontal field of view in degrees (walking models: used to place you in the room)")
+    ap.add_argument("--no-walk", action="store_true", help="walking model: copy the pose only, stay on the spot")
     a = ap.parse_args()
 
     import G1_tele                                                     # noqa: F401
-    from G1_tele.envs.live import LivePoseTrackingEnv
     from G1_tele.teleop import Teleop
 
     model = a.model or find_default_model()
     print(f"loading {os.path.abspath(model)}")
     policy = load_policy(model)
-    env = LivePoseTrackingEnv()
+    env, walking_model = make_env(policy.n_obs)
+    walk = walking_model and not a.no_walk
+    print("walking model: " + ("following your position and heading too" if walk else "kept on the spot (--no-walk)")
+          if walking_model else "pose model: the robot copies your pose on the spot")
     teleop = Teleop(env, policy, min_visibility=a.min_visibility, acquire_frames=a.acquire, hold_seconds=a.hold,
                     tau=a.smooth, level=not a.no_level, com_weight=a.com_weight, kin=env.kin,
-                    one_euro=not a.no_filter)
+                    one_euro=not a.no_filter, walk=walk, hfov=a.fov)
     camera = PoseCamera(a.video if a.video else a.camera, loop=a.loop, complexity=a.complexity,
                         width=a.cam_width, height=a.cam_height)
     camera.start()
@@ -291,7 +323,7 @@ def main():
             det = camera.latest
             if det is not None and det["n"] != last_n:                 # a new camera frame
                 last_n = det["n"]
-                teleop.on_pose(det["world"], det["vis"], det["t"])
+                teleop.on_pose(det["world"], det["vis"], det["t"], image=det.get("image"), aspect=det.get("aspect"))
 
             now = time.perf_counter()
             if paused:
@@ -318,10 +350,14 @@ def main():
             limbs = ", ".join(n.replace("_", " ") for n, ok in tracked.items() if ok) or "-"
             state = teleop.state + ("  (paused)" if paused else "")
             colour = {"tracking": (80, 220, 80), "holding": (60, 200, 255)}.get(teleop.state, (200, 200, 200))
+            walking = ""
+            if walk:
+                x, y, yaw = teleop.room
+                walking = f"   you: {np.hypot(x, y):.1f} m from start, turned {np.degrees(yaw):+.0f} deg"
             lines = [(f"{state.upper()}   resets {teleop.resets}   falls {teleop.falls}   "
                       f"pose error {100 * info.get('kp_err', np.nan):.1f} cm   "
                       f"camera {camera.fps:.0f} fps   sim {sim_rate:.2f}x real time", colour),
-                     (f"copying: {limbs}      v record   r reset   c level   m mirror   space pause   q quit",
+                     (f"copying: {limbs}{walking}      v record   r reset   c level   m mirror   space pause   q quit",
                       (200, 200, 200))]
             cam_img, robot_img = panels(det["frame"] if det else None, view.render(), mirror)
             both = np.hstack([cam_img, robot_img])

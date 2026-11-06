@@ -24,13 +24,21 @@ motion-library clips (root + 29 joints at 50 Hz, the same format as synthetic.np
      would move faster than max_joint_speed (rad/s) split the segment again.
   6. Segments shorter than min_seconds are dropped.
 
+walk=True (needs the image landmarks, (T, 33, 2), and the image's width / height): the clips also
+carry where the person walked and which way they faced (HumanToRobot.room_pose), relative to the
+start of each clip, for training walking policies (train_locomotion.py). Frames whose position
+can't be worked out are dropped, a position moving faster than max_root_speed (m/s) or a heading
+turning faster than max_turn_rate (rad/s) counts as a glitch, and the path is smoothed over
+root_smooth seconds (depth from one camera is noisy). Face the camera roughly (up to side-on): with
+their back to it, MediaPipe often swaps a person's left and right.
+
 The report says how much was kept and why the rest was dropped.
 """
 from pathlib import Path
 
 import numpy as np
 
-from G1_tele.motion.human import LM, HumanToRobot
+from G1_tele.motion.human import LM, HumanToRobot, place_in_room
 from G1_tele.motion.kinematics import ANKLE_HEIGHT, KEYPOINT_SETS, G1Kinematics
 from G1_tele.motion.library import MOTION_DIR, MotionLibrary, save_library
 from G1_tele.motion.retarget import KeypointRetargeter
@@ -44,7 +52,7 @@ REQUIRED = {"full": _ARMS + ["left_hip", "right_hip"] + _LEGS, "upper": _ARMS + 
 _LEG_LANDMARKS = [LM[n] for n in _LEGS]
 
 DEFAULTS = dict(min_visibility=0.5, max_spike=0.08, heading_smooth=0.15, max_speed=6.0, max_gap=0.15, smooth=0.04, max_ik_err=0.06,
-                max_joint_speed=12.0, min_seconds=2.0)
+                max_joint_speed=12.0, min_seconds=2.0, max_root_speed=3.0, max_turn_rate=6.0, root_smooth=0.12)
 
 
 def missing_landmarks(visibility, parts="full", min_visibility=0.5):
@@ -82,11 +90,15 @@ def _split(mask):
 
 
 def clean_take(times, world, visibility, parts="full", name="take", level_from=None, kin=None,
-               com_weight=0.0, **settings):
+               com_weight=0.0, image=None, aspect=None, walk=False, hfov=65.0, **settings):
     """Returns (clips, report). clips: list of dicts with root (T,7), joints (T,29), name, ik_err.
     level_from: landmarks (N, 33, 3) of the person standing upright (e.g. during a countdown), used
-    to level the camera; if None, the first half second of good frames is used."""
+    to level the camera; if None, the first half second of good frames is used.
+    walk: also keep where the person walked (needs image (T, 33, 2) and aspect = width / height)."""
     s = {**DEFAULTS, **settings}
+    if walk and (image is None or not aspect):
+        raise ValueError("walk=True needs the image landmarks and the image's aspect ratio "
+                         "(recorded with record_motion.py from this version on)")
     times, world, vis = np.asarray(times, float), np.asarray(world, float), np.asarray(visibility, float)
     kin = kin or G1Kinematics()
     conv = HumanToRobot(kin, s["min_visibility"])
@@ -137,13 +149,22 @@ def clean_take(times, world, visibility, parts="full", name="take", level_from=N
     lefts = np.stack([np.cos(yaw), np.sin(yaw), np.zeros_like(yaw)], 1)
 
     # robot keypoints for every remaining frame
-    kps, prev = [], None
+    kps, prev, room = [], None, []
     for k, i in enumerate(good):
         if prev is not None and times[i] - times[prev] > s["max_gap"]:
             conv.reset_contacts()
         kp = conv(world[i], vis[i], left=lefts[k])
         kps.append(np.array([kp[n] for n in NAMES])); prev = i
+        if walk:
+            rp = conv.room_pose(world[i], image[i], vis[i], aspect, hfov)
+            room.append([np.nan] * 3 if rp is None else [rp[0][0], rp[0][1], conv.heading])
     kps = np.array(kps)
+    if walk:                                               # no position: drop the frame
+        room = np.array(room)
+        room[:, 2] = np.unwrap(np.nan_to_num(room[:, 2]))
+        placed = np.isfinite(room[:, 0])
+        report["jump_frames"] += int((~placed).sum())
+        good, kps, room = good[placed], kps[placed], room[placed]
 
     # 3. segments (speed check against the last kept frame)
     segments, seg, last, rejected_in_row = [], [], None, 0
@@ -152,15 +173,19 @@ def clean_take(times, world, visibility, parts="full", name="take", level_from=N
             segments.append(seg); seg, last, rejected_in_row = [], None, 0
         x = kps[k]
         if last is not None:
-            speed = np.max(np.linalg.norm(x - seg[-1][1], axis=1)) / max(times[i] - times[last], 1e-3)
+            gap = max(times[i] - times[last], 1e-3)
+            speed = np.max(np.linalg.norm(x - seg[-1][1], axis=1)) / gap
+            if walk and (np.linalg.norm(room[k, :2] - seg[-1][2][:2]) / gap > s["max_root_speed"]
+                         or abs(room[k, 2] - seg[-1][2][2]) / gap > s["max_turn_rate"]):
+                speed = np.inf                              # the position or heading jumped
             if speed > s["max_speed"]:
                 report["jump_frames"] += 1
                 rejected_in_row += 1
                 if rejected_in_row >= 3:                    # the kept frame was the odd one out: restart here
-                    segments.append(seg[:-1]); seg, last, rejected_in_row = [(times[i], x)], i, 0
+                    segments.append(seg[:-1]); seg, last, rejected_in_row = [(times[i], x, room[k] if walk else None)], i, 0
                 continue
         rejected_in_row = 0
-        seg.append((times[i], x)); last = i
+        seg.append((times[i], x, room[k] if walk else None)); last = i
     segments.append(seg)
 
     # 4.-6. resample, smooth, IK, pose check
@@ -169,8 +194,8 @@ def clean_take(times, world, visibility, parts="full", name="take", level_from=N
         if len(seg) < 2 or seg[-1][0] - seg[0][0] < s["min_seconds"]:
             report["short_s"] += float(seg[-1][0] - seg[0][0]) if len(seg) > 1 else 0.0
             continue
-        ts = np.array([t for t, _ in seg])
-        xs = np.array([x for _, x in seg])                              # (n, 12, 3)
+        ts = np.array([t for t, _, _ in seg])
+        xs = np.array([x for _, x, _ in seg])                           # (n, 12, 3)
         grid = np.arange(ts[0], ts[-1] + 1e-9, 1.0 / FPS)
         X = np.stack([[np.interp(grid, ts, xs[:, k, d]) for d in range(3)] for k in range(len(NAMES))], 0)
         X = np.transpose(X, (2, 0, 1))                                  # (m, 12, 3)
@@ -184,6 +209,14 @@ def clean_take(times, world, visibility, parts="full", name="take", level_from=N
             r, j, e = ik.step(dict(zip(NAMES, frame)))
             roots.append(r); joints.append(j); errs.append(e)
         roots, joints, errs = np.array(roots), np.array(joints), np.array(errs)
+        if walk:                                            # where they walked, relative to the clip start
+            rs = np.array([r for _, _, r in seg])
+            Rm = np.stack([np.interp(grid, ts, rs[:, d]) for d in range(3)], 1)
+            Rm = _gaussian_smooth(Rm, s["root_smooth"] * FPS)
+            c0, s0 = np.cos(Rm[0, 2]), np.sin(Rm[0, 2])
+            d = Rm[:, :2] - Rm[0, :2]
+            rel = np.stack([c0 * d[:, 0] + s0 * d[:, 1], -s0 * d[:, 0] + c0 * d[:, 1], Rm[:, 2] - Rm[0, 2]], 1)
+            roots = np.array([place_in_room(r, p) for r, p in zip(roots, rel)])
         reach = errs <= s["max_ik_err"]
         speed = np.r_[0.0, np.max(np.abs(np.diff(joints, axis=0)), axis=1) * FPS]
         calm = speed <= s["max_joint_speed"]
@@ -195,7 +228,7 @@ def clean_take(times, world, visibility, parts="full", name="take", level_from=N
                 report["short_s"] += max(dur, 0.0)
                 continue
             clip = {"root": roots[a:b], "joints": joints[a:b], "ik_err": float(errs[a:b].mean()),
-                    "name": f"{name}_{len(clips)}"}
+                    "name": f"{name}_{len(clips)}", "t0": float(grid[a])}
             clips.append(clip)
             report["clips"].append({"name": clip["name"], "seconds": round(dur, 2),
                                     "ik_err_cm": round(100 * clip["ik_err"], 1)})
@@ -249,6 +282,9 @@ def save_raw(path, takes):
     for i, tk in enumerate(takes):
         for key in ("times", "world", "visibility"):
             data[f"{key}_{i}"] = np.asarray(tk[key], np.float32 if key != "times" else np.float64)
+        if tk.get("image") is not None:                     # image landmarks: needed to recover walking
+            data[f"image_{i}"] = np.asarray(tk["image"], np.float32)
+            data[f"aspect_{i}"] = np.float32(tk["aspect"])
         data[f"level_{i}"] = np.asarray(tk.get("level_from") if tk.get("level_from") is not None else np.zeros((0, 33, 3)), np.float32)
         data[f"name_{i}"] = np.array(tk["name"])
         data[f"parts_{i}"] = np.array(tk["parts"])
@@ -260,4 +296,6 @@ def load_raw(path):
     f = np.load(path, allow_pickle=False)
     return [{"times": f[f"times_{i}"], "world": f[f"world_{i}"], "visibility": f[f"visibility_{i}"],
              "level_from": f[f"level_{i}"] if len(f[f"level_{i}"]) else None,
-             "name": str(f[f"name_{i}"]), "parts": str(f[f"parts_{i}"])} for i in range(int(f["n_takes"]))]
+             "name": str(f[f"name_{i}"]), "parts": str(f[f"parts_{i}"]),
+             "image": f[f"image_{i}"] if f"image_{i}" in f else None,
+             "aspect": float(f[f"aspect_{i}"]) if f"aspect_{i}" in f else None} for i in range(int(f["n_takes"]))]

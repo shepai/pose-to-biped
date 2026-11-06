@@ -20,6 +20,14 @@ and at the robot's size:
     few centimetres of the floor counts as planted and is put exactly on it (with hysteresis), so
     landmark noise doesn't make a planted foot look lifted to the policy.
 
+Walking (for policies trained with locomotion=True): the world landmarks are centred on the hips, so
+they don't say where the person is. hip_position() recovers that from the image landmarks: it finds
+the shift T that makes the metric skeleton (world landmarks + T) project onto the image landmarks
+through a pinhole camera with the given field of view - a small linear least-squares problem.
+room_pose() turns it, with the heading, into a position on the floor and a heading angle in the
+levelled camera frame. Depth is the least certain part (it comes from the person's apparent size),
+so it is smoothed more than the sideways position by the caller (Teleop).
+
 Pure numpy: MediaPipe itself is only needed by whatever produces the landmarks
 (examples/RL/live_pose.py).
 """
@@ -51,6 +59,45 @@ def _frame(up, left):
     left = np.asarray(left, float)
     y = _unit(left - np.dot(left, z) * z, [0, 1, 0])
     return np.stack([np.cross(y, z), y, z], axis=1)
+
+
+def hip_position(world, image, visibility, aspect, hfov_deg=65.0, min_visibility=0.5):
+    """Hip centre relative to the camera (metres, MediaPipe axes: x right, y down, z away).
+
+    world: (33, 3) pose_world_landmarks (metric, hip-centred); image: (33, 2) pose_landmarks x, y
+    (0-1 across the image); aspect: image width / height; hfov_deg: the camera's horizontal field of
+    view. Each visible landmark i must satisfy  (X_i + T) projected = image_i, i.e.
+        Tx - a_i Tz = a_i Z_i - X_i   and   Ty - b_i Tz = b_i Z_i - Y_i
+    with (a_i, b_i) its normalised image coordinates. Returns None if too few landmarks are visible."""
+    W, I, v = np.asarray(world, float), np.asarray(image, float), np.asarray(visibility, float)
+    use = v >= min_visibility
+    if use.sum() < 6:
+        return None
+    t = np.tan(np.radians(hfov_deg) / 2)
+    a = (I[use, 0] - 0.5) * 2 * t
+    b = (I[use, 1] - 0.5) * 2 * t / aspect
+    X, Y, Z = W[use, 0], W[use, 1], W[use, 2]
+    n = len(a)
+    A = np.zeros((2 * n, 3))
+    A[:n, 0], A[:n, 2], A[n:, 1], A[n:, 2] = 1.0, -a, 1.0, -b
+    y = np.concatenate([a * Z - X, b * Z - Y])
+    w = np.sqrt(np.concatenate([v[use], v[use]]))
+    T, *_ = np.linalg.lstsq(A * w[:, None], y * w, rcond=None)
+    return T if T[2] > 0.3 else None                     # in front of the camera
+
+
+def place_in_room(root, room):
+    """A root pose (7,) from the person's heading frame (pelvis near the origin, facing +x) placed at
+    room pose (x, y, yaw): the robot's root where the person stands and faces."""
+    root = np.array(root, float)
+    x, y, yaw = room
+    c, s = np.cos(yaw), np.sin(yaw)
+    root[:2] = np.array([x + c * root[0] - s * root[1], y + s * root[0] + c * root[1]])
+    qz = np.array([np.cos(yaw / 2), 0.0, 0.0, np.sin(yaw / 2)])
+    w1, v1 = qz[0], qz[1:]
+    w2, v2 = root[3], root[4:7]
+    root[3:7] = np.concatenate([[w1 * w2 - v1 @ v2], w1 * v2 + w2 * v1 + np.cross(v1, v2)])
+    return root
 
 
 def _rotation_between(a, b, max_deg=180.0):
@@ -97,6 +144,7 @@ class HumanToRobot:
         self.R_level = np.eye(3)
         self.tracked = {}
         self.planted = {"left_foot": True, "right_foot": True}
+        self.heading = 0.0
 
     # ------------------------------------------------------------------ checks and calibration
     def torso_visible(self, visibility):
@@ -143,6 +191,7 @@ class HumanToRobot:
                 (lm("left_shoulder") - lm("right_shoulder"))
         left = np.array([left[0], left[1], 0.0])
         H = _frame([0, 0, 1], left)                          # the person's heading frame (camera levelled)
+        self.heading = float(np.arctan2(H[1, 0], H[0, 0]))   # where they face, in the levelled camera frame
 
         def h(p):                                            # -> heading frame, origin between the hips
             return H.T @ (p - hip_mid)
@@ -192,6 +241,16 @@ class HumanToRobot:
             if self.planted[f]:
                 out[f][2] = ANKLE_HEIGHT
         return out
+
+    def room_pose(self, world_landmarks, image_landmarks, visibility, aspect, hfov_deg=65.0):
+        """(x, y) of the hip centre on the floor and the heading (rad), both in the levelled camera frame
+        (x right, y away from the camera), or None if the position can't be worked out.
+        Call after __call__() for the same frame (it uses the heading worked out there)."""
+        T = hip_position(world_landmarks, image_landmarks, visibility, aspect, hfov_deg, self.min_visibility)
+        if T is None:
+            return None
+        p = self.levelled(T[None])[0]
+        return np.array([p[0], p[1]]), self.heading
 
 
 class KeypointFilter:

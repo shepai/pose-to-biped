@@ -6,6 +6,7 @@ examples/RL/record_motion.py  -  record your own motions with a webcam, as train
     python examples/RL/record_motion.py --name lab --no-window --stop-after 60   # no display, stop after an hour
     python examples/RL/record_motion.py --name dance --video dance.mp4  # a video file instead of the webcam
     python examples/RL/record_motion.py --reprocess src/G1_tele/assets/motions/human/lab_day1   # clean again
+    python examples/RL/record_motion.py --name walks --walk             # keep where you walk and turn too
 
 It records by itself. Whenever every body point it needs is visible, the frames go into the current
 "slot". When the person is lost (a needed point missing, or nobody found) for longer than --max-gap
@@ -16,9 +17,9 @@ is written as it goes. Cleaning and saving run in the background, so recording n
 Only poses are saved - no images or video:
   slot_0001.npz      robot poses (pelvis position and orientation + 29 joint angles, 50 Hz, kind "human"),
                      the training data. A slot whose frames were all rejected while cleaning has none.
-  slot_0001_raw.npz  the MediaPipe body points of the slot (33 points with a confidence each, per frame),
-                     so it can be cleaned again with other settings (--reprocess) without recording again.
-                     --no-raw skips these.
+  slot_0001_raw.npz  the MediaPipe body points of the slot (33 points with a confidence each, per frame,
+                     in metres and in the image), so it can be cleaned again with other settings
+                     (--reprocess, also --reprocess ... --walk) without recording again. --no-raw skips these.
 Running again with the same --name adds new slots to the folder. For training:
     python examples/RL/finetune.py --from ... --name ... --motions src/G1_tele/assets/motions/human/lab_day1
 
@@ -27,6 +28,12 @@ or unsure, glitch frames (MediaPipe throwing a point away for a frame or two), p
 reach and joints moving implausibly fast. A clip never spans a gap, so saved motions have no jumps.
 Camera tilt is corrected from the person's average posture over the session (people are upright most of
 the time), so nobody has to stand still for a calibration.
+
+--walk: the clips also keep where you walked and which way you faced (kind "human_walk" unless --kind
+is given), for training walking policies:
+    python examples/RL/train_locomotion.py --from ... --name ... --motions src/G1_tele/assets/motions/human/walks
+Keep your whole body in view, and give the camera's horizontal field of view with --fov if it isn't
+about 65 degrees (your position comes from your size and place in the image).
 
 Keys (with a window; click it first): space pause / resume, m mirror, q or Esc quit (the current slot
 is saved first). Without a window (--no-window): Ctrl-C stops and saves.
@@ -69,21 +76,25 @@ def next_slot_number(folder):
 _KIN = None
 
 
-def clean_and_save(folder, name, slot, parts, kind, keep_raw, settings):
+def raw_take(slot, name, parts):
+    return {**{k: np.array(slot[k]) for k in ("times", "world", "visibility", "image")}, "aspect": slot["aspect"],
+            "level_from": slot["level_from"], "name": name, "parts": parts}
+
+
+def clean_and_save(folder, name, slot, parts, kind, keep_raw, settings, walk=False, hfov=65.0):
     """Runs in a separate process (inverse kinematics is heavy; a thread would slow the camera)."""
     global _KIN
     if _KIN is None:
         _KIN = G1Kinematics()
     folder = Path(folder)
-    times, world, vis = (np.array(slot[k]) for k in ("times", "world", "visibility"))
+    times, world, vis, image = (np.array(slot[k]) for k in ("times", "world", "visibility", "image"))
     clips, rep = clean_take(times, world, vis, parts=parts, name=name, level_from=slot["level_from"],
-                            kin=_KIN, **settings)
+                            kin=_KIN, image=image, aspect=slot["aspect"], walk=walk, hfov=hfov, **settings)
     folder.mkdir(parents=True, exist_ok=True)
     if clips:
         save_clips(folder / f"{name}.npz", clips, kind=kind)
     if keep_raw:
-        save_raw(folder / f"{name}_raw.npz", [{"times": times, "world": world, "visibility": vis,
-                                                "level_from": slot["level_from"], "name": name, "parts": parts}])
+        save_raw(folder / f"{name}_raw.npz", [raw_take(slot, name, parts)])
     return rep, bool(clips)
 
 
@@ -105,7 +116,8 @@ class SlotWriter(threading.Thread):
         return pool
 
     def _clean(self, name, slot):
-        args = (str(self.folder), name, slot, self.a.parts, self.a.kind, not self.a.no_raw, settings_from(self.a))
+        args = (str(self.folder), name, slot, self.a.parts, self.a.kind, not self.a.no_raw, settings_from(self.a),
+                self.a.walk, self.a.fov)
         try:
             return self.pool.submit(clean_and_save, *args).result()
         except Exception:                                   # noqa: BLE001  the worker died: one fresh try
@@ -132,9 +144,7 @@ class SlotWriter(threading.Thread):
                 msg = f"{name} could not be cleaned ({e})"
                 try:                                        # keep the raw points so --reprocess can recover it
                     self.folder.mkdir(parents=True, exist_ok=True)
-                    save_raw(self.folder / f"{name}_raw.npz", [{**{k: np.array(slot[k]) for k in ("times", "world", "visibility")},
-                                                               "level_from": slot["level_from"], "name": name,
-                                                               "parts": self.a.parts}])
+                    save_raw(self.folder / f"{name}_raw.npz", [raw_take(slot, name, self.a.parts)])
                     msg += f"; raw points kept in {name}_raw.npz for --reprocess"
                 except Exception:                           # noqa: BLE001
                     pass
@@ -194,7 +204,7 @@ def record(a):
             det = camera.latest
             if det is not None and det["n"] != last_n:                    # ---- a new camera frame
                 last_n = det["n"]
-                now, world, vis = det["t"], det["world"], det["vis"]
+                now, world, vis, image = det["t"], det["world"], det["vis"], det.get("image")
                 missing = None if world is None else missing_landmarks(vis, a.parts, a.min_visibility)
                 good = world is not None and not missing and not paused
                 if paused:
@@ -209,8 +219,9 @@ def record(a):
                     if slot is not None and now - last_good > a.max_gap_slot:
                         close_slot("gap")
                     if slot is None:
-                        slot = {"times": [], "world": [], "visibility": []}
+                        slot = {"times": [], "world": [], "visibility": [], "image": [], "aspect": det.get("aspect")}
                     slot["times"].append(now); slot["world"].append(world); slot["visibility"].append(vis)
+                    slot["image"].append(image if image is not None else np.full((33, 2), np.nan))
                     last_good = now
                     n_good += 1
                     if n_good % 5 == 0:                                   # posture samples for levelling
@@ -297,8 +308,13 @@ def reprocess(a):
         out = raw.with_name(raw.name.replace("_raw.npz", ".npz"))
         clips = []
         for tk in load_raw(raw):
+            if a.walk and tk.get("image") is None:
+                print(f"{tk['name']}: recorded before image landmarks were saved - its walking can't be recovered, "
+                      "cleaned as poses only")
             c, rep = clean_take(tk["times"], tk["world"], tk["visibility"], parts=a.parts or tk["parts"],
-                                name=tk["name"], level_from=tk["level_from"], kin=kin, **settings_from(a))
+                                name=tk["name"], level_from=tk["level_from"], kin=kin, image=tk.get("image"),
+                                aspect=tk.get("aspect"), walk=a.walk and tk.get("image") is not None, hfov=a.fov,
+                                **settings_from(a))
             print(f"{tk['name']}: {describe(rep)}")
             clips += c
         if clips:
@@ -316,7 +332,10 @@ def main():
     ap.add_argument("--out-dir", default=str(HUMAN_DIR), help="where the folders go")
     ap.add_argument("--parts", default=None, choices=("full", "upper"),
                     help="full body (default), or upper body only with the legs kept standing")
-    ap.add_argument("--kind", default="human", help="clip kind stored in the files (used to weight training)")
+    ap.add_argument("--kind", default=None,
+                    help='clip kind stored in the files (used to weight training; default "human", "human_walk" with --walk)')
+    ap.add_argument("--walk", action="store_true", help="keep where you walk and turn too (for walking policies)")
+    ap.add_argument("--fov", type=float, default=65.0, help="the camera's horizontal field of view in degrees (--walk)")
     ap.add_argument("--camera", type=int, default=0, help="webcam index")
     ap.add_argument("--video", default=None, help="a video file instead of the webcam")
     ap.add_argument("--cam-width", type=int, default=None)
@@ -343,6 +362,7 @@ def main():
     g.add_argument("--max-ik-err", type=float, default=None, help="largest IK error kept (m)")
     g.add_argument("--max-joint-speed", type=float, default=None, help="fastest joint movement kept (rad/s)")
     a = ap.parse_args()
+    a.kind = a.kind or ("human_walk" if a.walk else "human")
     a.max_gap_slot = a.max_gap
     if a.reprocess:
         return reprocess(a)

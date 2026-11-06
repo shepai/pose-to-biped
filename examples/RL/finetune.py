@@ -24,6 +24,9 @@ network, PPO settings, logs, evaluation videos and checkpoints. What changes:
     well the policy follows them, next to the synthetic kinds, so you can see if it forgets anything.
 
 Motion files must be 50 Hz like synthetic.npz (record_motion.py and make_motions.py write 50 Hz).
+
+Walking models (from train_locomotion.py) are recognised from their observation size: they are
+fine-tuned in the locomotion env, with the walking clips (locomotion.npz) mixed in as well.
 """
 import argparse
 import glob
@@ -44,7 +47,7 @@ from stable_baselines3 import PPO        # noqa: E402
 from stable_baselines3.common.logger import configure  # noqa: E402
 from stable_baselines3.common.vec_env import VecNormalize  # noqa: E402
 
-from G1_tele.motion.library import DEFAULT_MOTIONS, MotionLibrary  # noqa: E402
+from G1_tele.motion.library import DEFAULT_MOTIONS, LOCO_MOTIONS, MotionLibrary  # noqa: E402
 
 MIN_CLIP_SECONDS = 1.5                   # the env only starts episodes on clips at least this long
 
@@ -83,11 +86,28 @@ def motion_files(items):
     return files
 
 
-def motion_mix(new_files, use_synthetic=True, new_share=0.6):
+def is_walking_model(base):
+    """True if the model was trained with locomotion=True (train_locomotion.py)."""
+    n_obs = int(PPO.load(base, device="cpu").observation_space.shape[0])
+    sizes = {}
+    for env_id in (T.EVAL_ID, T.LOCO_EVAL):
+        kw = {"motion_file": str(DEFAULT_MOTIONS)}
+        e = gym.make(env_id, **kw).unwrapped
+        sizes[env_id] = int(e.observation_space.shape[0])
+        e.close()
+    if n_obs == sizes[T.LOCO_EVAL]:
+        return True
+    if n_obs != sizes[T.EVAL_ID]:
+        raise SystemExit(f"{base} expects {n_obs} observations, but the pose env has {sizes[T.EVAL_ID]} and the "
+                         f"walking env {sizes[T.LOCO_EVAL]}")
+    return False
+
+
+def motion_mix(new_files, use_synthetic=True, new_share=0.6, walking=False):
     """Files for the env and kind weights that give each kind the wanted share of episodes.
     The env picks clips in proportion to their length times their kind's weight, so a kind's weight
     is its share divided by its total (usable) length."""
-    syn = [DEFAULT_MOTIONS.resolve()] if use_synthetic else []
+    syn = ([DEFAULT_MOTIONS.resolve()] + ([LOCO_MOTIONS.resolve()] if walking else [])) if use_synthetic else []
     files = list(new_files) + syn
     try:
         lib = MotionLibrary(files)
@@ -126,7 +146,7 @@ def print_mix(new_files, info, lib, use_synthetic):
         m = MotionLibrary(f)
         print(f"   {f}  ({m.n_clips} clips, {sum(m.duration(c) for c in range(m.n_clips)) / 60:.1f} min)")
     if use_synthetic:
-        print(f"plus {DEFAULT_MOTIONS.name} ({lib.n_clips - info['n_new_clips']} clips) so nothing is forgotten")
+        print(f"plus the synthetic library ({lib.n_clips - info['n_new_clips']} clips) so nothing is forgotten")
     if info["shared_kinds"]:
         print(f"note: new clips of kind {info['shared_kinds']} share that kind with the synthetic library, "
               "so they can't get their own share of episodes")
@@ -135,7 +155,7 @@ def print_mix(new_files, info, lib, use_synthetic):
         print(f"   {k:10s} {100 * s:5.1f} %   ({info['seconds'][k] / 60:.1f} min of clips)")
 
 
-def dry_run(a, base, files, weights, info, lib, env_id):
+def dry_run(a, base, files, weights, info, lib, env_id, eval_id=T.EVAL_ID):
     """Check the mix the env really samples, and how the starting policy does on the new clips."""
     env = gym.make(env_id, motion_file=[str(f) for f in files], kind_weights=weights).unwrapped
     rng = np.random.default_rng(0)
@@ -146,7 +166,7 @@ def dry_run(a, base, files, weights, info, lib, env_id):
     model = PPO.load(base, device="cpu")
     with open(base + "_vecnormalize.pkl", "rb") as f:
         vecnorm = pickle.load(f)
-    ev = gym.make(T.EVAL_ID, motion_file=[str(f) for f in files]).unwrapped
+    ev = gym.make(eval_id, motion_file=[str(f) for f in files]).unwrapped
     new = [c for c in range(info["n_new_clips"]) if lib.duration(c) >= MIN_CLIP_SECONDS][:a.check_clips]
     print(f"starting policy on {len(new)} of your clips (up to 10 s each, from the start of the clip):")
     surv = []
@@ -169,7 +189,7 @@ def dry_run(a, base, files, weights, info, lib, env_id):
     ev.close()
 
 
-def finetune(a, base, files, weights, info, env_id, steps):
+def finetune(a, base, files, weights, info, env_id, steps, eval_id=T.EVAL_ID):
     env_kwargs = {"motion_file": [str(f) for f in files], "kind_weights": weights}
     log_dir = prepare_run_dir(os.path.join(T.LOG_ROOT, a.name))
     venv = T.make_env(env_id, a.n_envs, **env_kwargs)
@@ -185,12 +205,12 @@ def finetune(a, base, files, weights, info, env_id, steps):
     model.set_logger(configure(log_dir, fmt))
     save_config(log_dir, run=a.name, finetuned_from=os.path.abspath(base), env_id=env_id,
                 env_kwargs={**gym.spec(env_id).kwargs, **env_kwargs}, motion_files=[str(f) for f in files],
-                episode_share=info["share"], eval_env_id=T.EVAL_ID, n_envs=a.n_envs, total_timesteps=steps,
+                episode_share=info["share"], eval_env_id=eval_id, n_envs=a.n_envs, total_timesteps=steps,
                 ppo=T.PPO_KW, learning_rate=list(a.lr), curriculum=False,
                 video_every_pct=T.VIDEO_EVERY_PCT, checkpoint_every_pct=T.CHECKPOINT_EVERY_PCT,
                 eval_episodes_per_kind=a.eval_episodes, mujoco_gl=dict(GL_INFO))
 
-    recorder = PeriodicVideoEvalCallback(T.EVAL_ID, steps, log_dir, a.name, every_pct=T.VIDEO_EVERY_PCT,
+    recorder = PeriodicVideoEvalCallback(eval_id, steps, log_dir, a.name, every_pct=T.VIDEO_EVERY_PCT,
                                          video_seconds_per_kind=T.VIDEO_SECONDS_PER_KIND,
                                          episodes_per_kind=a.eval_episodes,
                                          env_kwargs={"motion_file": [str(f) for f in files]})
@@ -245,12 +265,22 @@ def main():
               f"{'it is mixed in anyway' if not a.no_synthetic else 'left out (--no-synthetic)'})")
         if not new_files:
             raise SystemExit("no new motion files left")
-    files, weights, info, lib = motion_mix(new_files, not a.no_synthetic, a.new_share)
+    walking = is_walking_model(base)
+    if walking:
+        if not LOCO_MOTIONS.exists():
+            raise SystemExit(f"{base} is a walking model but {LOCO_MOTIONS} is missing: "
+                             "python examples/RL/make_motions.py loco")
+        new_files = [f for f in new_files if f != LOCO_MOTIONS.resolve()]
+        print("walking model: fine-tuning in the locomotion env, with the walking clips mixed in")
+    files, weights, info, lib = motion_mix(new_files, not a.no_synthetic, a.new_share, walking)
     print_mix(new_files, info, lib, not a.no_synthetic)
-    env_id = T.STAGE2 if a.robust else T.STAGE1
+    if walking:
+        env_id, eval_id = (T.LOCO_ROBUST if a.robust else T.LOCO_TRAIN), T.LOCO_EVAL
+    else:
+        env_id, eval_id = (T.STAGE2 if a.robust else T.STAGE1), T.EVAL_ID
     if a.dry_run:
-        return dry_run(a, base, files, weights, info, lib, env_id)
-    finetune(a, base, files, weights, info, env_id, parse_steps(a.steps))
+        return dry_run(a, base, files, weights, info, lib, env_id, eval_id)
+    finetune(a, base, files, weights, info, env_id, parse_steps(a.steps), eval_id)
 
 
 if __name__ == "__main__":
