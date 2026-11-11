@@ -46,7 +46,7 @@ def record_frames(model, venv, seconds=10.0, fps=25, width=480, height=360, kind
     cam = mujoco.MjvCamera()
     cam.type = mujoco.mjtCamera.mjCAMERA_TRACKING
     cam.trackbodyid = raw.pelvis_id
-    cam.distance, cam.azimuth, cam.elevation = 2.6, 135.0, -15.0
+    cam.distance, cam.azimuth, cam.elevation = 2.6 * raw.kin.scale, 135.0, -15.0     # further back for bigger robots
 
     venv.seed(seed)
     obs = venv.reset()
@@ -93,6 +93,7 @@ def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("checkpoints", nargs="+", help="model path(s), with or without .zip (globs are fine)")
     p.add_argument("--env", default=EVAL_ID, help="env id (default: the unassisted eval env)")
+    p.add_argument("--robot", default=None, help="robot to film (default: the model's first robot)")
     p.add_argument("--seconds", type=float, default=10.0, help="length of each GIF")
     p.add_argument("--kind", default=None, help="only play one motion kind: upper, whole, balance, step")
     p.add_argument("--fps", type=int, default=25, help="GIF frame rate (the sim runs at 50 Hz)")
@@ -112,10 +113,10 @@ def main():
 
     for path in paths:
         base = path[:-4] if path.endswith(".zip") else path
-        out = a.out or f"{base}{'_' + a.kind if a.kind else ''}.gif"
+        out = a.out or f"{base}{'_' + a.robot if a.robot else ''}{'_' + a.kind if a.kind else ''}.gif"
         print(f"recording {os.path.basename(base)} ({a.seconds:.0f} s, MUJOCO_GL="
               f"{os.environ.get('MUJOCO_GL', 'glfw')}) ...", flush=True)
-        model, venv = load_policy(path, a.env)
+        model, venv = load_policy(path, a.env, a.robot)
         try:
             frames, episodes = record_frames(model, venv, a.seconds, a.fps, a.width, a.height, a.kind, a.seed)
         finally:

@@ -1,10 +1,16 @@
 """
-Policy-agnostic Gymnasium environment for the Unitree G1 (29 DoF, optional hands) in MuJoCo.
+Policy-agnostic Gymnasium environment for a humanoid in MuJoCo: HumanoidEnv(robot="g1"), any robot
+in G1_tele.robots. G1Env is HumanoidEnv for the G1 (29 DoF, optional hands).
 
-The model is loaded from   G1_tele/assets/g1_description/g1_29dof.xml   (override with xml_path=)
-The xml must contain a floor (unitree_rl_gym's g1_29dof.xml does).
+The model is the robot's RobotSpec.xml_path (override with xml_path=); it must contain a floor.
+The G1's is   G1_tele/assets/g1_description/g1_29dof.xml   (unitree_rl_gym's g1_29dof.xml).
 
-Joint order of the 29 controlled body joints (used for `action`, `state()["q"]`, ...):
+Body joints are the robot's RobotSpec joints in slot order (legs, waist, arms, head; see
+G1_tele.robots.spec). PD gains, torque limits and rotor inertia come from the RobotSpec where it
+gives them and from the model's actuators otherwise (position actuators: kp, kv; force / control
+ranges: torque limits). Every actuator is turned into a plain torque motor; PD runs here.
+
+Joint order of the G1's 29 controlled body joints (used for `action`, `state()["q"]`, ...):
     0-11   legs   (L hip_pitch, hip_roll, hip_yaw, knee, ankle_pitch, ankle_roll, then R)
     12-14  waist  (yaw, roll, pitch)
     15-21  left arm  (shoulder_pitch, shoulder_roll, shoulder_yaw, elbow, wrist_roll, wrist_pitch, wrist_yaw)
@@ -31,6 +37,8 @@ import mujoco
 import mujoco.viewer
 import gymnasium as gym
 from gymnasium import spaces
+
+from G1_tele.robots import get_robot
 
 XML_PATH = Path(__file__).resolve().parent.parent / "assets" / "g1_description" / "g1_29dof.xml"
 
@@ -63,35 +71,70 @@ ARMATURE = np.array([_A14, _A22, _A14, _A22, 2 * _A50, 2 * _A50] * 2 + [_A14, 2 
                     + [_A50, _A50, _A50, _A50, _A50, _A40, _A40] * 2, np.float32)
 
 
-class G1Env(gym.Env):
+def actuator_limits(m, act_adr):
+    """(kp, kd, torque limit) per actuator from the model: position actuators give kp / kv, and the
+    torque limit is the force range, else the control range x gear (motors), else the joint's
+    actuator force range. NaN where the model doesn't say."""
+    n = len(act_adr)
+    kp, kd, tau = np.full(n, np.nan), np.full(n, np.nan), np.full(n, np.nan)
+    gear = getattr(m, "actuator_gear", None)
+    for i, a in enumerate(act_adr):
+        if int(m.actuator_biastype[a]) == 1 and m.actuator_gainprm[a, 0] > 0:      # position servo
+            kp[i] = m.actuator_gainprm[a, 0]
+            kd[i] = -m.actuator_biasprm[a, 2]
+        g = abs(float(gear[a, 0])) if gear is not None else 1.0
+        j = int(m.actuator_trnid[a, 0])
+        if m.actuator_forcelimited[a] and m.actuator_forcerange[a, 1] > 0:
+            tau[i] = m.actuator_forcerange[a, 1]
+        elif m.actuator_ctrllimited[a] and int(m.actuator_biastype[a]) == 0 and m.actuator_ctrlrange[a, 1] > 0:
+            tau[i] = m.actuator_ctrlrange[a, 1] * g
+        elif hasattr(m, "jnt_actfrclimited") and m.jnt_actfrclimited[j] and m.jnt_actfrcrange[j, 1] > 0:
+            tau[i] = m.jnt_actfrcrange[j, 1]
+    return kp, kd, tau
+
+
+class HumanoidEnv(gym.Env):
     metadata = {"render_modes": ["human"], "render_fps": 50}
 
-    def __init__(self, xml_path=XML_PATH, render_mode=None, key_callback=None,
+    def __init__(self, xml_path=None, render_mode=None, key_callback=None,
                  sim_dt=0.002, decimation=10, action_scale=0.25,
-                 max_episode_seconds=20.0, fall_height=0.5, fall_tilt=-0.6, armature="auto"):
+                 max_episode_seconds=20.0, fall_height=None, fall_tilt=-0.6, armature="auto", robot=None):
         super().__init__()
-        self.m = mujoco.MjModel.from_xml_path(str(xml_path))
+        spec = get_robot(robot)
+        if xml_path is not None and Path(xml_path) != Path(spec.xml_path):
+            spec = spec.with_xml(xml_path)
+        self.spec = spec
+        if not Path(spec.xml_path).exists():
+            raise FileNotFoundError(f"{spec.xml_path} not found - for robots other than the G1 run "
+                                    "python examples/get_robots.py first")
+        self.m = mujoco.MjModel.from_xml_path(str(spec.xml_path))
         self.m.opt.timestep = sim_dt
         self.d = mujoco.MjData(self.m)
+        names = spec.joint_names
+        self.joint_names = names
+
+        j = lambda n: self.m.joint(n)
+        act_for = {int(self.m.actuator_trnid[i, 0]): i for i in range(self.m.nu)}
+        no_act = [n for n in names if j(n).id not in act_for]
+        if no_act:
+            raise ValueError(f"{spec.name}: joints without an actuator in {spec.xml_path}: {no_act}")
+        self.act_adr = np.array([act_for[j(n).id] for n in names])
+        m_kp, m_kd, m_tau = actuator_limits(self.m, self.act_adr)
         self._to_torque_mode()
 
         self.sim_dt, self.decim = sim_dt, decimation
         self.dt = sim_dt * decimation
-        self.action_scale = np.full(len(BODY_JOINTS), action_scale, np.float32)  # per-joint, editable
+        self.n_joints = len(names)
+        self.action_scale = np.full(self.n_joints, action_scale, np.float32)  # per-joint, editable
         self.max_steps = int(max_episode_seconds / self.dt)
-        self.fall_height, self.fall_tilt = fall_height, fall_tilt
-
-        j = lambda n: self.m.joint(n)
-        self.n_joints = len(BODY_JOINTS)
-        self.q_adr = np.array([j(n).qposadr[0] for n in BODY_JOINTS])
-        self.v_adr = np.array([j(n).dofadr[0] for n in BODY_JOINTS])
-        act_for = {int(self.m.actuator_trnid[i, 0]): i for i in range(self.m.nu)}
-        self.act_adr = np.array([act_for[j(n).id] for n in BODY_JOINTS])
-        self.q_lo = np.array([j(n).range[0] for n in BODY_JOINTS], np.float32)
-        self.q_hi = np.array([j(n).range[1] for n in BODY_JOINTS], np.float32)
+        self.q_adr = np.array([j(n).qposadr[0] for n in names])
+        self.v_adr = np.array([j(n).dofadr[0] for n in names])
+        self.q_lo = np.array([j(n).range[0] for n in names], np.float32)
+        self.q_hi = np.array([j(n).range[1] for n in names], np.float32)
+        self.root_id = self.m.body(spec.root_body).id
 
         # every other actuated joint (fingers) is held at 0
-        body_ids = {j(n).id for n in BODY_JOINTS}
+        body_ids = {j(n).id for n in names}
         hand = [(jid, a) for jid, a in act_for.items() if jid not in body_ids]
         self.hand_q = np.array([self.m.jnt_qposadr[jid] for jid, _ in hand], int)
         self.hand_v = np.array([self.m.jnt_dofadr[jid] for jid, _ in hand], int)
@@ -100,17 +143,33 @@ class G1Env(gym.Env):
         if armature is not None:
             arm = self.m.dof_armature
             if isinstance(armature, str):                 # "auto": only fill in if the xml has none
-                if np.all(arm[self.v_adr] == 0):
-                    arm[self.v_adr] = ARMATURE
+                want = spec.armature
+                if np.all(arm[self.v_adr] == 0) and np.any(np.isfinite(want)):
+                    ok = np.isfinite(want)
+                    arm[self.v_adr[ok]] = want[ok]
             else:
                 arm[self.v_adr] = armature
 
         if not any(self.m.geom_type[g] == mujoco.mjtGeom.mjGEOM_PLANE for g in range(self.m.ngeom)):
-            raise ValueError(f"{xml_path} has no floor plane. Use a scene xml that includes the robot "
+            raise ValueError(f"{spec.xml_path} has no floor plane. Use a scene xml that includes the robot "
                              "and a <geom type='plane'/> floor (unitree_rl_gym's g1_29dof.xml has one).")
 
-        self.default_q = DEFAULT_Q.copy()
-        self.kp, self.kd, self.tau_lim = KP.copy(), KD.copy(), TAU_LIM.copy()
+        def pick(given, measured, what):
+            out = np.where(np.isfinite(given), given, measured).astype(np.float32)
+            if not np.all(np.isfinite(out)):
+                bad = [names[i] for i in np.flatnonzero(~np.isfinite(out))]
+                raise ValueError(f"{spec.name}: no {what} for {bad} - give it in the RobotSpec "
+                                 "(the model's actuators don't say)")
+            return out
+        self.default_q = spec.default_q.copy()
+        self.kp = pick(spec.kp, m_kp, "PD stiffness (kp)")
+        self.kd = pick(spec.kd, m_kd, "PD damping (kd)")
+        self.tau_lim = pick(spec.tau_lim, m_tau, "torque limit")
+        from G1_tele.motion.kinematics import measure_geometry           # here: kinematics imports robots only
+        geo = measure_geometry(spec, self.m)
+        self.stand_height = geo["stand_height"]
+        self.fall_height = 0.63 * self.stand_height if fall_height is None else fall_height
+        self.fall_tilt = fall_tilt
         self.observation_space = spaces.Box(-np.inf, np.inf, (6 + 3 * self.n_joints,), np.float32)
         self.action_space = spaces.Box(-10.0, 10.0, (self.n_joints,), np.float32)
 
@@ -129,6 +188,11 @@ class G1Env(gym.Env):
         m.actuator_biasprm[:, :] = 0
         m.actuator_ctrllimited[:] = 0
         m.actuator_forcelimited[:] = 0
+        if hasattr(m, "actuator_gear"):
+            m.actuator_gear[:, :] = 0
+            m.actuator_gear[:, 0] = 1
+        if hasattr(m, "actuator_dyntype"):
+            m.actuator_dyntype[:] = 0                     # no filter / integrator dynamics
 
     # ------------------------------------------------------------------ state
     def _rot(self):
@@ -159,8 +223,7 @@ class G1Env(gym.Env):
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
         mujoco.mj_resetData(self.m, self.d)
-        if self.d.qpos[2] < 0.5:                     # xml gave no standing height
-            self.d.qpos[2] = 0.8
+        self.d.qpos[:7] = [0.0, 0.0, self.stand_height, 1.0, 0.0, 0.0, 0.0]
         self.d.qpos[self.q_adr] = self.default_q
         self.d.qpos[self.hand_q] = 0.0
         mujoco.mj_forward(self.m, self.d)
@@ -212,3 +275,11 @@ class G1Env(gym.Env):
         if self.viewer is not None:
             self.viewer.close()
             self.viewer = None
+
+
+class G1Env(HumanoidEnv):
+    """HumanoidEnv for the G1 (keeps the old signature: G1Env(xml_path, ...))."""
+
+    def __init__(self, xml_path=XML_PATH, *args, **kwargs):
+        kwargs.setdefault("robot", "g1")
+        super().__init__(xml_path, *args, **kwargs)

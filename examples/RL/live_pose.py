@@ -1,5 +1,5 @@
 """
-examples/RL/live_pose.py  -  the simulated G1 copies the person in front of your webcam
+examples/RL/live_pose.py  -  the simulated G1 (or another robot) copies the person in front of your webcam
 
     python examples/RL/live_pose.py                          # webcam 0, the final stage 1 policy
     python examples/RL/live_pose.py --camera 1               # another camera
@@ -7,6 +7,11 @@ examples/RL/live_pose.py  -  the simulated G1 copies the person in front of your
     python examples/RL/live_pose.py --model logs/pose_stage1/checkpoints/pose_stage1_030pct_18.0M
     python examples/RL/live_pose.py --record live.mp4        # record from the start (or press v any time)
     python examples/RL/live_pose.py --record-view robot      # what recordings contain: window, panels, robot, camera
+    python examples/RL/live_pose.py --model logs/pose_stage1_h1/pose_stage1_h1           # a model trained on the H1
+    python examples/RL/live_pose.py --model logs/pose_stage1_g1-h1-n1-t1/pose_stage1_g1-h1-n1-t1 --robot t1
+                                                             # a multi-robot model, driving the T1
+The robot (and the observation layout) come from the model's run (its config.json); --robot picks one
+of a multi-robot model's robots, or any robot for a model trained with --layout universal.
 
 MediaPipe Pose finds the person in each camera frame. Once their torso (shoulders and hips) has been
 visible for a few frames, the simulated robot is reset into their pose and the trained policy starts
@@ -89,15 +94,34 @@ def load_policy(model_path):
     return act
 
 
-def make_env(n_obs):
+def run_config(model_path):
+    """The config.json of the run a model or checkpoint belongs to ({} if there is none)."""
+    import json
+    d = Path(model_path).resolve().parent
+    for folder in (d, d.parent):                             # logs/<run>/ or logs/<run>/checkpoints/
+        if (folder / "config.json").exists():
+            return json.loads((folder / "config.json").read_text())
+    return {}
+
+
+def pick_robot(model_path, robot=None):
+    """(robot, layout) to run a model on: the run's first robot unless --robot says otherwise."""
+    cfg = run_config(model_path)
+    robots, layout = cfg.get("robots") or ["g1"], cfg.get("layout") or "native"
+    if robot is not None and robot not in robots and layout != "universal":
+        raise SystemExit(f"the model was trained on {robots} with the native layout; it can't drive the {robot}")
+    return robot or robots[0], layout
+
+
+def make_env(n_obs, robot="g1", layout="native"):
     """The live env that matches the model: pose only, or walking (locomotion=True)."""
     from G1_tele.envs.live import LivePoseTrackingEnv
-    env = LivePoseTrackingEnv()
+    env = LivePoseTrackingEnv(robot=robot, layout=layout)
     if env.observation_space.shape[0] == n_obs:
         return env, False
     sizes = [env.observation_space.shape[0]]
     env.close()
-    env = LivePoseTrackingEnv(locomotion=True)
+    env = LivePoseTrackingEnv(locomotion=True, robot=robot, layout=layout)
     if env.observation_space.shape[0] == n_obs:
         return env, True
     raise SystemExit(f"the model expects {n_obs} observations, but the live env has {sizes[0]} (pose) or "
@@ -257,6 +281,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--model", default=None,
                     help="trained model, with or without .zip (default: logs/pose_stage1T1/pose_stage1T1)")
+    ap.add_argument("--robot", default=None, help="robot to drive (default: the one the model was trained on)")
     ap.add_argument("--camera", type=int, default=0, help="webcam index")
     ap.add_argument("--video", default=None, help="video file instead of a webcam")
     ap.add_argument("--loop", action="store_true", help="loop the video file")
@@ -292,7 +317,9 @@ def main():
     model = a.model or find_default_model()
     print(f"loading {os.path.abspath(model)}")
     policy = load_policy(model)
-    env, walking_model = make_env(policy.n_obs)
+    robot, layout = pick_robot(model, a.robot)
+    print(f"robot: {robot} ({layout} layout)")
+    env, walking_model = make_env(policy.n_obs, robot, layout)
     walk = walking_model and not a.no_walk
     print("walking model: " + ("following your position and heading too" if walk else "kept on the spot (--no-walk)")
           if walking_model else "pose model: the robot copies your pose on the spot")

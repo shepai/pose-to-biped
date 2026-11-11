@@ -27,6 +27,10 @@ Motion files must be 50 Hz like synthetic.npz (record_motion.py and make_motions
 
 Walking models (from train_locomotion.py) are recognised from their observation size: they are
 fine-tuned in the locomotion env, with the walking clips (locomotion.npz) mixed in as well.
+
+Robots: the model's robot and layout are read from its run (config.json); the motion files must be
+for that robot (record_motion.py --robot / make_motions.py --robot). For a multi-robot model, pick
+the robot whose clips these are with --robot; the result is then a policy for that robot.
 """
 import argparse
 import glob
@@ -47,7 +51,10 @@ from stable_baselines3 import PPO        # noqa: E402
 from stable_baselines3.common.logger import configure  # noqa: E402
 from stable_baselines3.common.vec_env import VecNormalize  # noqa: E402
 
-from G1_tele.motion.library import DEFAULT_MOTIONS, LOCO_MOTIONS, MotionLibrary  # noqa: E402
+from G1_tele.motion.library import MotionLibrary, default_motions  # noqa: E402
+
+ROBOT = {"robot": "g1", "layout": "native"}   # set in main() from the model's run / --robot
+DEFAULT_MOTIONS = LOCO_MOTIONS = None          # that robot's synthetic.npz / locomotion.npz (main())
 
 MIN_CLIP_SECONDS = 1.5                   # the env only starts episodes on clips at least this long
 
@@ -91,7 +98,7 @@ def is_walking_model(base):
     n_obs = int(PPO.load(base, device="cpu").observation_space.shape[0])
     sizes = {}
     for env_id in (T.EVAL_ID, T.LOCO_EVAL):
-        kw = {"motion_file": str(DEFAULT_MOTIONS)}
+        kw = {"motion_file": str(DEFAULT_MOTIONS), **ROBOT}
         e = gym.make(env_id, **kw).unwrapped
         sizes[env_id] = int(e.observation_space.shape[0])
         e.close()
@@ -110,10 +117,10 @@ def motion_mix(new_files, use_synthetic=True, new_share=0.6, walking=False):
     syn = ([DEFAULT_MOTIONS.resolve()] + ([LOCO_MOTIONS.resolve()] if walking else [])) if use_synthetic else []
     files = list(new_files) + syn
     try:
-        lib = MotionLibrary(files)
+        lib = MotionLibrary(files, robot=ROBOT["robot"])
     except ValueError as e:
         raise SystemExit(f"can't combine the motion files: {e}")
-    n_new = MotionLibrary(new_files).n_clips                 # new clips come first in the combined library
+    n_new = MotionLibrary(new_files, robot=ROBOT["robot"]).n_clips                 # new clips come first in the combined library
     syn_kinds = sorted({str(k) for k in lib.kinds[n_new:]})
     new_kinds = sorted({str(k) for k in lib.kinds[:n_new]})
     shared = [k for k in new_kinds if k in syn_kinds]        # same name as a synthetic kind: can't be weighted apart
@@ -143,7 +150,7 @@ def motion_mix(new_files, use_synthetic=True, new_share=0.6, walking=False):
 def print_mix(new_files, info, lib, use_synthetic):
     print("new motions:")
     for f in new_files:
-        m = MotionLibrary(f)
+        m = MotionLibrary(f, robot=ROBOT["robot"])
         print(f"   {f}  ({m.n_clips} clips, {sum(m.duration(c) for c in range(m.n_clips)) / 60:.1f} min)")
     if use_synthetic:
         print(f"plus the synthetic library ({lib.n_clips - info['n_new_clips']} clips) so nothing is forgotten")
@@ -157,7 +164,7 @@ def print_mix(new_files, info, lib, use_synthetic):
 
 def dry_run(a, base, files, weights, info, lib, env_id, eval_id=T.EVAL_ID):
     """Check the mix the env really samples, and how the starting policy does on the new clips."""
-    env = gym.make(env_id, motion_file=[str(f) for f in files], kind_weights=weights).unwrapped
+    env = gym.make(env_id, motion_file=[str(f) for f in files], kind_weights=weights, **ROBOT).unwrapped
     rng = np.random.default_rng(0)
     got = Counter(str(lib.kinds[env.lib.sample_clip(rng, weights, MIN_CLIP_SECONDS)]) for _ in range(4000))
     print("sampled by the env (4000 draws): " + ", ".join(f"{k} {100 * n / 4000:.0f} %" for k, n in got.most_common()))
@@ -166,7 +173,7 @@ def dry_run(a, base, files, weights, info, lib, env_id, eval_id=T.EVAL_ID):
     model = PPO.load(base, device="cpu")
     with open(base + "_vecnormalize.pkl", "rb") as f:
         vecnorm = pickle.load(f)
-    ev = gym.make(eval_id, motion_file=[str(f) for f in files]).unwrapped
+    ev = gym.make(eval_id, motion_file=[str(f) for f in files], **ROBOT).unwrapped
     new = [c for c in range(info["n_new_clips"]) if lib.duration(c) >= MIN_CLIP_SECONDS][:a.check_clips]
     print(f"starting policy on {len(new)} of your clips (up to 10 s each, from the start of the clip):")
     surv = []
@@ -192,7 +199,7 @@ def dry_run(a, base, files, weights, info, lib, env_id, eval_id=T.EVAL_ID):
 def finetune(a, base, files, weights, info, env_id, steps, eval_id=T.EVAL_ID):
     env_kwargs = {"motion_file": [str(f) for f in files], "kind_weights": weights}
     log_dir = prepare_run_dir(os.path.join(T.LOG_ROOT, a.name))
-    venv = T.make_env(env_id, a.n_envs, **env_kwargs)
+    venv = T.make_env(env_id, a.n_envs, robots=[ROBOT["robot"]], layout=ROBOT["layout"], **env_kwargs)
     venv = VecNormalize.load(base + "_vecnormalize.pkl", venv)
     venv.training, venv.norm_reward = True, True
     model = PPO.load(base, env=venv, device="cpu", learning_rate=T.linear_schedule(*a.lr))
@@ -205,6 +212,7 @@ def finetune(a, base, files, weights, info, env_id, steps, eval_id=T.EVAL_ID):
     model.set_logger(configure(log_dir, fmt))
     save_config(log_dir, run=a.name, finetuned_from=os.path.abspath(base), env_id=env_id,
                 env_kwargs={**gym.spec(env_id).kwargs, **env_kwargs}, motion_files=[str(f) for f in files],
+                robots=[ROBOT["robot"]], layout=ROBOT["layout"],
                 episode_share=info["share"], eval_env_id=eval_id, n_envs=a.n_envs, total_timesteps=steps,
                 ppo=T.PPO_KW, learning_rate=list(a.lr), curriculum=False,
                 video_every_pct=T.VIDEO_EVERY_PCT, checkpoint_every_pct=T.CHECKPOINT_EVERY_PCT,
@@ -213,7 +221,7 @@ def finetune(a, base, files, weights, info, env_id, steps, eval_id=T.EVAL_ID):
     recorder = PeriodicVideoEvalCallback(eval_id, steps, log_dir, a.name, every_pct=T.VIDEO_EVERY_PCT,
                                          video_seconds_per_kind=T.VIDEO_SECONDS_PER_KIND,
                                          episodes_per_kind=a.eval_episodes,
-                                         env_kwargs={"motion_file": [str(f) for f in files]})
+                                         env_kwargs={"motion_file": [str(f) for f in files], **ROBOT})
     callbacks = [TrackingStatsCallback(),
                  PeriodicCheckpointCallback(steps, log_dir, a.name, every_pct=T.CHECKPOINT_EVERY_PCT),
                  recorder]
@@ -253,11 +261,23 @@ def main():
                     help="evaluation episodes per motion kind")
     ap.add_argument("--dry-run", action="store_true", help="show the mix and test the starting policy, don't train")
     ap.add_argument("--check-clips", type=int, default=20, help="clips tested by --dry-run")
+    ap.add_argument("--robot", default=None, help="robot the motions are for (default: the model's first robot)")
     a = ap.parse_args()
     if not 0.0 < a.new_share <= 1.0:
         ap.error("--new-share must be between 0 and 1")
 
     base = model_base(a.model)
+    global DEFAULT_MOTIONS, LOCO_MOTIONS
+    cfg = T.run_config(base)
+    robots, layout = cfg.get("robots") or ["g1"], cfg.get("layout") or "native"
+    robot = a.robot or robots[0]
+    if robot not in robots and layout != "universal":
+        raise SystemExit(f"{base} was trained on {robots} with the native layout; it can't drive the {robot}")
+    ROBOT.update(robot=robot, layout=layout)
+    DEFAULT_MOTIONS, LOCO_MOTIONS = default_motions(robot), default_motions(robot, loco=True)
+    if not DEFAULT_MOTIONS.exists() and not a.no_synthetic:
+        raise SystemExit(f"{DEFAULT_MOTIONS} is missing: python examples/RL/make_motions.py synth --robot {robot}")
+    print(f"robot: {robot} ({layout} layout)")
     new_files = motion_files(a.motions)
     if DEFAULT_MOTIONS.resolve() in new_files:              # e.g. --motions src/G1_tele/assets/motions
         new_files.remove(DEFAULT_MOTIONS.resolve())
@@ -269,7 +289,7 @@ def main():
     if walking:
         if not LOCO_MOTIONS.exists():
             raise SystemExit(f"{base} is a walking model but {LOCO_MOTIONS} is missing: "
-                             "python examples/RL/make_motions.py loco")
+                             f"python examples/RL/make_motions.py loco --robot {robot}")
         new_files = [f for f in new_files if f != LOCO_MOTIONS.resolve()]
         print("walking model: fine-tuning in the locomotion env, with the walking clips mixed in")
     files, weights, info, lib = motion_mix(new_files, not a.no_synthetic, a.new_share, walking)

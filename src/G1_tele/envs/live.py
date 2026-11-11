@@ -35,8 +35,9 @@ Walking (locomotion=True, for models from train_locomotion.py)
 """
 import numpy as np
 
+from G1_tele.robots import get_robot
 from G1_tele.envs.pose_tracking import PoseTrackingEnv
-from G1_tele.motion.kinematics import ANKLE_HEIGHT, quat_mul, quat_to_mat, rot_z, slerp, yaw_of_quat
+from G1_tele.motion.kinematics import Kinematics, quat_mul, quat_to_mat, rot_z, slerp, yaw_of_quat
 
 
 def _wrap(a):
@@ -132,21 +133,29 @@ class LiveReference:
 
 class LivePoseTrackingEnv(PoseTrackingEnv):
     def __init__(self, max_kp_err=1.0, init_noise=0.0, max_joint_speed=None, locomotion=False, root_tau=0.25,
-                 max_root_speed=0.6, max_yaw_rate=1.0, leash=(0.35, 0.5), **kwargs):
+                 max_root_speed=None, max_yaw_rate=1.0, leash=None, **kwargs):
         # joint speed limit of the reference: like the training motions (3 rad/s; walking clips peak at ~5)
         max_joint_speed = max_joint_speed or (5.0 if locomotion else 3.0)
         kwargs.pop("episode_seconds", None)
-        super().__init__(max_kp_err=max_kp_err, init_noise=init_noise, episode_seconds=1e9, locomotion=locomotion,
-                         **kwargs)
+        kwargs.pop("motion_file", None)                    # the reference is live: no motion library needed
+        spec = get_robot(kwargs.get("robot"))
+        if kwargs.get("xml_path") is not None:
+            spec = spec.with_xml(kwargs["xml_path"])
+        k = Kinematics(spec)
+        q0 = k.default_qpos()
+        q0[2] -= k.keypoints_local(["left_foot"], q0)[0, 2] - k.ankle_height     # standing, feet on the floor
+        standing_root, standing_joints = q0[:7].copy(), q0[k.q_adr].copy()
+        sc = k.scale                                       # G1 numbers -> this robot's size
+        max_root_speed = 0.6 * sc if max_root_speed is None else max_root_speed
+        leash = (0.35 * sc, 0.5) if leash is None else leash
+        lib = LiveReference(standing_root, standing_joints, max_joint_speed, locomotion, root_tau,
+                            max_root_speed, max_yaw_rate)
+        super().__init__(motion_file=lib, max_kp_err=max_kp_err, init_noise=init_noise, episode_seconds=1e9,
+                         locomotion=locomotion, **kwargs)
+        self.standing_root, self.standing_joints = standing_root, standing_joints
         self.end_off_course = False
         self.leash = (float(leash[0]), float(leash[1]))
         self.offset = np.zeros(3)                          # room frame -> world: (x, y, yaw)
-        k = self.kin
-        q0 = k.default_qpos()
-        q0[2] -= k.keypoints_local(["left_foot"], q0)[0, 2] - ANKLE_HEIGHT     # standing, feet on the floor
-        self.standing_root, self.standing_joints = q0[:7].copy(), q0[k.q_adr].copy()
-        self.lib = LiveReference(self.standing_root, self.standing_joints, max_joint_speed, locomotion, root_tau,
-                                 max_root_speed, max_yaw_rate)
         self.clip_kinds = ["live"]
         self.reset()
 
@@ -161,7 +170,7 @@ class LivePoseTrackingEnv(PoseTrackingEnv):
         return root
 
     def reset(self, seed=None, options=None):
-        """options may hold "root" (7,) and "joints" (29,): the pose to start in (root in the room
+        """options may hold "root" (7,) and "joints" (J,): the pose to start in (root in the room
         frame), and "new_room": True to forget any re-anchoring (a new person)."""
         options = dict(options or {})
         if options.pop("new_room", False):
@@ -203,5 +212,5 @@ class LivePoseTrackingEnv(PoseTrackingEnv):
 
     @property
     def reference(self):
-        """Current reference (root (7,) in the world, joints (29,))."""
+        """Current reference (root (7,) in the world, joints (J,))."""
         return self.lib.root.copy(), self.lib.joints.copy()

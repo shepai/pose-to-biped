@@ -132,6 +132,7 @@ class TrackingStatsCallback(BaseCallback):
         self.buf = {k: [] for k in list(self.KEYS) + ["rew"]}
         self.ep_len, self.fell, self.lost, self.eps = [], 0, 0, 0
         self.off_course = 0
+        self.per_robot = {}                                  # robot -> [episodes, falls or lost] (multi-robot runs)
 
     def _on_step(self):
         infos, dones = self.locals["infos"], self.locals["dones"]
@@ -148,6 +149,10 @@ class TrackingStatsCallback(BaseCallback):
                 self.off_course += int(bool(info.get("off_course", False)) and not info.get("fell", False))
                 if "episode" in info:
                     self.ep_len.append(info["episode"]["l"])
+                if "robot" in info:
+                    pr = self.per_robot.setdefault(info["robot"], [0, 0])
+                    pr[0] += 1
+                    pr[1] += int(bool(info.get("fell", False)) or bool(info.get("lost", False)))
         return True
 
     def _on_rollout_end(self):
@@ -177,6 +182,9 @@ class TrackingStatsCallback(BaseCallback):
                 rec("track/end_off_course", self.off_course / self.eps)
         if self.ep_len:
             rec("track/ep_len_s", float(np.mean(self.ep_len)) * self.dt)
+        if len(self.per_robot) > 1:                         # training on several robots: falls per robot
+            for r, (n, f) in sorted(self.per_robot.items()):
+                rec(f"track/fall_rate_{r}", f / max(1, n))
 
 
 class CurriculumCallback(BaseCallback):
@@ -318,10 +326,13 @@ class PeriodicVideoEvalCallback(_PercentCallback):
 
     def __init__(self, env_id, total_timesteps, log_dir, run_name, every_pct=5, video_seconds_per_kind=4.0,
                  episodes_per_kind=2, max_episode_seconds=10.0, env_kwargs=None, width=640, height=480,
-                 distance=2.6, azimuth=135.0, elevation=-15.0):
+                 distance=2.6, azimuth=135.0, elevation=-15.0, tag=None):
+        """tag: name for this evaluation when there are several (one per robot in a multi-robot run):
+        results go to eval_<tag>.csv, eval_<tag>/* columns and videos/<run>_<tag>_<pct>.mp4."""
         super().__init__(total_timesteps, every_pct, at_start=True)
         self.env_id, self.env_kwargs = env_id, dict(env_kwargs or {})
         self.log_dir, self.run = log_dir, run_name
+        self.tag = tag
         self.video_s, self.per_kind, self.max_ep_s = video_seconds_per_kind, episodes_per_kind, max_episode_seconds
         self.size, self.cam_cfg = (width, height), (distance, azimuth, elevation)
         self.env = self.renderer = None
@@ -329,7 +340,8 @@ class PeriodicVideoEvalCallback(_PercentCallback):
         self.video_status = "not started"
         self.announced = False
         self.t0 = time.time()
-        self.csv_path = os.path.join(log_dir, "eval.csv")
+        self.csv_path = os.path.join(log_dir, f"eval_{tag}.csv" if tag else "eval.csv")
+        self.key = f"eval_{tag}" if tag else "eval"
 
     # ---------- setup
     def _setup(self):
@@ -363,6 +375,7 @@ class PeriodicVideoEvalCallback(_PercentCallback):
             cam.type = mujoco.mjtCamera.mjCAMERA_TRACKING
             cam.trackbodyid = self.env.pelvis_id
             cam.distance, cam.azimuth, cam.elevation = self.cam_cfg
+            cam.distance *= getattr(getattr(self.env, "kin", None), "scale", 1.0)       # bigger robots: further away
             self.cam = cam
         except Exception as e:                                   # noqa: BLE001
             self.render_ok = False
@@ -423,7 +436,8 @@ class PeriodicVideoEvalCallback(_PercentCallback):
         if frames:
             if max(int(f.max()) for f in frames[:: max(1, len(frames) // 10)]) == 0:
                 print("[video] warning: rendered frames are completely black (broken OpenGL driver?)")
-            video, how = write_video(frames, os.path.join(self.log_dir, "videos", f"{self.run}_{label}.mp4"),
+            name = f"{self.run}_{self.tag}_{label}" if self.tag else f"{self.run}_{label}"
+            video, how = write_video(frames, os.path.join(self.log_dir, "videos", f"{name}.mp4"),
                                      fps=round(1.0 / env.dt))
             video_col = os.path.basename(video)
             if not self.announced or not how.startswith("mp4"):
@@ -453,10 +467,11 @@ class PeriodicVideoEvalCallback(_PercentCallback):
             wr.writerow(row)
         for key in ["survival", "ep_len_s", "kp_err_cm", "hand_err_cm", "foot_err_cm"] + \
                    (["vel_err_m_s", "root_err_cm"] if self.loco else []) + [f"survival_{k}" for k in self.kinds]:
-            self.logger.record(f"eval/{key}", row[key])
+            self.logger.record(f"{self.key}/{key}", row[key])
         per_kind = "  ".join(f"{k} {row[f'survival_{k}']:.2f}" for k in self.kinds)
         walk = f", speed err {row['vel_err_m_s']:.2f} m/s" if self.loco else ""
-        print(f"[eval {row['pct']:5.1f}%] survival {row['survival']:.2f} ({per_kind}), "
+        who = f" {self.tag}" if self.tag else ""
+        print(f"[eval{who} {row['pct']:5.1f}%] survival {row['survival']:.2f} ({per_kind}), "
               f"kp err {row['kp_err_cm']:.1f} cm{walk}, video: {video_col}", flush=True)
 
     def record_now(self, label_pct=None):

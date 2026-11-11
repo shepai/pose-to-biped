@@ -33,7 +33,7 @@ treated as a bad frame and skipped.
 import numpy as np
 
 from G1_tele.motion.human import HumanToRobot, KeypointFilter, place_in_room
-from G1_tele.motion.kinematics import G1Kinematics, rot_z
+from G1_tele.motion.kinematics import rot_z
 from G1_tele.motion.retarget import KeypointRetargeter
 
 
@@ -56,7 +56,7 @@ class Teleop:
         self.yaw_filter = KeypointFilter(min_cutoff=0.6, beta=0.3)   # heading (rad)
         self.room0, self.room, self.heading_prev = None, np.zeros(3), 0.0
         self.image, self.glitches = None, 0
-        self.kin = kin or G1Kinematics()                       # for IK (sharing env.kin is fine: every use runs FK first)
+        self.kin = kin or env.kin                              # the env's robot (sharing env.kin is fine: every use runs FK first)
         self.human = HumanToRobot(self.kin, min_visibility)
         self.ik_kw = dict(com_weight=com_weight)
         self.retarget = KeypointRetargeter(self.kin, **self.ik_kw)

@@ -1,5 +1,7 @@
 """
-Walking and turning reference clips for the G1: clip kinds "turn", "walk" and "loco".
+Walking and turning reference clips for any robot in G1_tele.robots: clip kinds "turn", "walk" and "loco".
+(Speeds, step lengths and heights were tuned on the G1 and are scaled to the robot's leg length and
+hip width, like SyntheticMotionGenerator's.)
 
     turn   turning on the spot, left and right, with stops in between; arms near rest
     walk   walking forwards, backwards and sideways (gentle turns), starting and stopping; arms near rest
@@ -26,9 +28,8 @@ locomotion=True).
 import numpy as np
 from scipy.linalg import solve_discrete_are
 
-from G1_tele.envs.whole_body import DEFAULT_Q
-from G1_tele.motion.kinematics import ANKLE_HEIGHT, FOOT_CENTER, quat_from_rpy, quat_to_mat, rot_z
-from G1_tele.motion.synthetic import UPPER, SyntheticMotionGenerator, min_jerk
+from G1_tele.motion.kinematics import quat_from_rpy, quat_to_mat, rot_z
+from G1_tele.motion.synthetic import SyntheticMotionGenerator, foot_tasks, min_jerk
 
 LOCO_KINDS = ("turn", "walk", "loco")
 G = 9.81
@@ -89,11 +90,11 @@ def _wrap(a):
 
 class GaitGenerator:
     """Makes "turn", "walk" and "loco" clips. Shares the robot model, IK settings and random arm
-    poses with SyntheticMotionGenerator (pass one in, or a G1Kinematics via kin=)."""
+    poses with SyntheticMotionGenerator (pass one in, a Kinematics via kin=, or robot="h1")."""
 
     def __init__(self, kin=None, fps=50, seed=0, synth=None, collision_check_every=4, max_joint_vel=10.0,
-                 verbose=True):
-        self.s = synth or SyntheticMotionGenerator(kin, fps=fps, seed=seed, verbose=False)
+                 verbose=True, robot=None):
+        self.s = synth or SyntheticMotionGenerator(kin, fps=fps, seed=seed, verbose=False, robot=robot)
         self.k = self.s.k
         self.fps = fps
         self.dt = 1.0 / fps
@@ -139,7 +140,9 @@ class GaitGenerator:
             seg = int(r.uniform(2.0, 5.0) * self.fps)
             target[i:i + seg] = self._command_segment(kind)
             i += seg
-        acc = np.array([0.6, 0.4, 1.2]) * self.dt              # m/s^2, m/s^2, rad/s^2 per step
+        sc = np.array([self.k.scale, self.k.scale, 1.0])       # G1 speeds -> this robot's size
+        target = target * sc
+        acc = np.array([0.6, 0.4, 1.2]) * sc * self.dt         # m/s^2, m/s^2, rad/s^2 per step
         cmd = np.zeros((n, 3))
         for i in range(1, n):
             cmd[i] = cmd[i - 1] + np.clip(target[i] - cmd[i - 1], -acc, acc)
@@ -156,27 +159,26 @@ class GaitGenerator:
         return path
 
     # ------------------------------------------------------------------ footsteps
-    @staticmethod
-    def _centre(foot):
+    def _centre(self, foot):
         x, y, z, yaw = foot
-        return np.array([x, y]) + rot_z(yaw)[:2, :2] @ FOOT_CENTER
+        return np.array([x, y]) + rot_z(yaw)[:2, :2] @ self.k.foot_center
 
     def _nominal(self, pose, side, half_w):
         """Ankle pose (x, y, z, yaw) of a foot standing square under body pose (x, y, yaw)."""
         x, y, yaw = pose
         R = rot_z(yaw)[:2, :2]
         sgn = 1.0 if side == "L" else -1.0
-        xy = np.array([x, y]) + R @ (np.array([0.0, sgn * half_w]) - FOOT_CENTER)
+        xy = np.array([x, y]) + R @ (np.array([0.0, sgn * half_w]) - self.k.foot_center)
         return np.array([xy[0], xy[1], 0.0, yaw])
 
-    @staticmethod
-    def _reach(target, stance, side):
+    def _reach(self, target, stance, side):
         """Clamp a landing pose to what one step from the stance foot can reach without collisions."""
+        k = self.k
         sgn = 1.0 if side == "L" else -1.0
         Rs = rot_z(stance[3])[:2, :2]
         rel = Rs.T @ (target[:2] - stance[:2])
-        rel[0] = np.clip(rel[0], -0.18, 0.28)
-        rel[1] = sgn * np.clip(sgn * rel[1], 0.17, 0.36)
+        rel[0] = np.clip(rel[0], k.to_length(-0.18), k.to_length(0.28))
+        rel[1] = sgn * np.clip(sgn * rel[1], 2 * k.to_half_width(0.085), 2 * k.to_half_width(0.18))
         dyaw = _wrap(target[3] - stance[3])
         dyaw = np.clip(dyaw, -0.15, 0.45) if sgn > 0 else np.clip(dyaw, -0.45, 0.15)   # toe-out more than toe-in
         xy = stance[:2] + Rs @ rel
@@ -187,8 +189,11 @@ class GaitGenerator:
         r, fps = self.rng, self.fps
         n = int(round(seconds * fps))
         hold = int(r.uniform(0.4, 1.0) * fps)
-        p = dict(half_w=r.uniform(0.105, 0.13), t_ss=r.uniform(0.42, 0.55), t_ds=r.uniform(0.10, 0.16),
-                 lift=r.uniform(0.05, 0.08), h=r.uniform(0.70, 0.745))
+        k = self.k
+        p = dict(half_w=k.to_half_width(r.uniform(0.105, 0.13)), t_ss=r.uniform(0.42, 0.55),
+                 t_ds=r.uniform(0.10, 0.16), lift=k.to_length(r.uniform(0.05, 0.08)),
+                 h=k.to_height(r.uniform(0.70, 0.745)))
+        near = k.to_length(0.025)                               # "feet square under the body" tolerance
         cmd = self._commands(kind, n, hold)
         path = self._path(cmd)
         nss, nds = int(round(p["t_ss"] * fps)), int(round(p["t_ds"] * fps))
@@ -204,7 +209,7 @@ class GaitGenerator:
                 c = cmd[ahead]
                 swing = "L" if (c[1] > 0.01 or c[2] > 0.05) else "R" if (c[1] < -0.01 or c[2] < -0.05) \
                     else ("L" if r.random() < 0.5 else "R")
-            square = all(np.linalg.norm(feet[s][:2] - self._nominal(path[i], s, p["half_w"])[:2]) < 0.025
+            square = all(np.linalg.norm(feet[s][:2] - self._nominal(path[i], s, p["half_w"])[:2]) < near
                          and abs(_wrap(feet[s][3] - path[i, 2])) < 0.06 for s in "LR")
             if not moving and square:                           # stand still, weight in the middle
                 F["L"][i], F["R"][i] = feet["L"], feet["R"]
@@ -244,7 +249,7 @@ class GaitGenerator:
     def _upper_track(self, kind, n):
         r = self.rng
         lo, hi = (0.0, 0.35) if kind in ("turn", "walk") else (0.25, 0.85)
-        out = np.zeros((n, len(DEFAULT_Q[UPPER])))
+        out = np.zeros((n, len(self.s.upper)))
         q0 = self.s._upper(r.uniform(lo, hi) * 0.5)
         i = 0
         while i < n:
@@ -263,13 +268,9 @@ class GaitGenerator:
     def _solve(self, q, L, R, com, h, upper, pitch, iters):
         k = self.k
         q = q.copy()
-        q[k.q_adr[UPPER]] = upper
+        q[k.q_adr[self.s.upper]] = upper
         yaw = L[3] + 0.5 * _wrap(R[3] - L[3])
-        tasks = [
-            {"type": "point", "body": self.fl, "offset": np.zeros(3), "target": np.array([L[0], L[1], ANKLE_HEIGHT + L[2]]), "w": 200.0},
-            {"type": "orient", "body": self.fl, "target": rot_z(L[3]), "w": 50.0},
-            {"type": "point", "body": self.fr, "offset": np.zeros(3), "target": np.array([R[0], R[1], ANKLE_HEIGHT + R[2]]), "w": 200.0},
-            {"type": "orient", "body": self.fr, "target": rot_z(R[3]), "w": 50.0},
+        tasks = foot_tasks(k, L, R) + [
             {"type": "com", "target": com, "w": 100.0},
             {"type": "root_height", "target": h, "w": 10.0},
             {"type": "root_orient", "target": quat_to_mat(quat_from_rpy(0.0, pitch, yaw)), "w": 3.0},

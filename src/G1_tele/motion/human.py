@@ -13,7 +13,7 @@ and at the robot's size:
     person can stand at an angle to the camera. Turning on the spot is not copied: the policy
     tracks body pose relative to the pelvis, not where the robot faces.
   * Proportions: every limb keeps the person's direction but gets the robot's length, so any
-    adult maps onto the 1.3 m G1 with reachable targets.
+    adult maps onto the robot (the 1.3 m G1, the 1.8 m H1, ...) with reachable targets.
   * Missing limbs: an arm or leg whose landmarks aren't visible enough (legs hidden by a desk, an
     arm out of frame) is put in the robot's default pose, carried by the torso (arms) or pelvis (legs).
   * Ground: the pose is moved up or down so the lower foot stands on the floor, and a foot within a
@@ -33,7 +33,7 @@ Pure numpy: MediaPipe itself is only needed by whatever produces the landmarks
 """
 import numpy as np
 
-from G1_tele.motion.kinematics import ANKLE_HEIGHT, KEYPOINT_SETS, G1Kinematics
+from G1_tele.motion.kinematics import KEYPOINT_SETS, Kinematics
 
 # MediaPipe Pose landmark indices used here
 LM = dict(left_shoulder=11, right_shoulder=12, left_elbow=13, right_elbow=14, left_wrist=15, right_wrist=16,
@@ -115,17 +115,20 @@ def _rotation_between(a, b, max_deg=180.0):
 
 class HumanToRobot:
     """converter = HumanToRobot(); keypoints = converter(world_landmarks, visibility)
+    (HumanToRobot(robot="h1") or HumanToRobot(kin) for another robot)
 
     world_landmarks: (33, 3) MediaPipe pose_world_landmarks; visibility: (33,) in [0, 1].
     Returns dict name -> (3,) heading-frame position for the 12 "full" keypoints. After each call,
     converter.tracked says which limbs came from the person (the rest are the default pose).
     """
 
-    def __init__(self, kin=None, min_visibility=0.5, plant_height=0.03, lift_height=0.05):
-        k = kin or G1Kinematics()
+    def __init__(self, kin=None, min_visibility=0.5, plant_height=0.03, lift_height=0.05, robot=None):
+        k = kin or Kinematics(robot)
+        self.k = k
+        self.ankle_height = k.ankle_height
         self.names = list(KEYPOINT_SETS["full"])
         q0 = k.default_qpos()
-        q0[2] -= k.keypoints_local(["left_foot"], q0)[0, 2] - ANKLE_HEIGHT      # feet on the floor
+        q0[2] -= k.keypoints_local(["left_foot"], q0)[0, 2] - k.ankle_height      # feet on the floor
         self.standing_qpos = q0
         self.standing_root, self.standing_joints = q0[:7].copy(), q0[k.q_adr].copy()
         P = dict(zip(self.names, k.keypoints_local(self.names, q0)))
@@ -140,7 +143,7 @@ class HumanToRobot:
         self.length = {"upper_arm": length("shoulder", "elbow"), "forearm": length("elbow", "hand"),
                        "thigh": length("hip", "knee"), "shin": length("knee", "foot")}
         self.min_visibility = float(min_visibility)
-        self.plant_height, self.lift_height = float(plant_height), float(lift_height)
+        self.plant_height, self.lift_height = float(plant_height) * k.scale, float(lift_height) * k.scale
         self.R_level = np.eye(3)
         self.tracked = {}
         self.planted = {"left_foot": True, "right_foot": True}
@@ -233,13 +236,14 @@ class HumanToRobot:
                 out[f"{s}_foot"] = hip + (P0[f"{s}_foot"] - P0[f"{s}_hip"])
                 self.tracked[f"{s}_leg"] = False
 
-        dz = ANKLE_HEIGHT - min(out["left_foot"][2], out["right_foot"][2])      # lower foot on the floor
+        A = self.ankle_height
+        dz = A - min(out["left_foot"][2], out["right_foot"][2])      # lower foot on the floor
         out = {n: out[n] + np.array([0.0, 0.0, dz]) for n in self.names}
         for f in ("left_foot", "right_foot"):                  # planted feet exactly on the floor
-            lift = out[f][2] - ANKLE_HEIGHT
+            lift = out[f][2] - A
             self.planted[f] = lift < (self.lift_height if self.planted[f] else self.plant_height)
             if self.planted[f]:
-                out[f][2] = ANKLE_HEIGHT
+                out[f][2] = A
         return out
 
     def room_pose(self, world_landmarks, image_landmarks, visibility, aspect, hfov_deg=65.0):

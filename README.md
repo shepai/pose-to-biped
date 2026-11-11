@@ -1,6 +1,6 @@
 # pose-to-biped
 
-Teaching a simulated Unitree G1 humanoid to copy a person's pose while keeping its balance, with reinforcement learning in MuJoCo. The long-term aim is to drive the robot from a live body tracker, and the first version of that is here: the simulated robot copies the person in front of your webcam. This README covers the simulation, the reinforcement learning and the webcam demo; the `pose/` folder will be documented separately.
+Teaching a simulated Unitree G1 humanoid - and other humanoids (Unitree H1, Booster T1, Fourier N1, or your own) - to copy a person's pose while keeping its balance, with reinforcement learning in MuJoCo. The long-term aim is to drive the robot from a live body tracker, and the first version of that is here: the simulated robot copies the person in front of your webcam. This README covers the simulation, the reinforcement learning and the webcam demo; the `pose/` folder will be documented separately.
 
 ![The simulated G1 following reference poses](assets/following.gif)
 
@@ -13,6 +13,7 @@ One policy drives 23 of the G1's 29 joints (the wrists are held still). It is gi
 - [What's in the repository](#whats-in-the-repository)
 - [Installation](#installation)
 - [Quick start: watch a trained policy](#quick-start-watch-a-trained-policy)
+- [Other humanoids (H1, T1, N1, ...)](#other-humanoids-h1-t1-n1-)
 - [Examples](#examples)
   - [Copy a person with your webcam](#copy-a-person-with-your-webcam-live_posepy)
   - [Record your own motions](#record-your-own-motions-record_motionpy)
@@ -32,10 +33,11 @@ Only the parts used for reinforcement learning are listed here.
 
 ```
 src/G1_tele/                    the Python package (installed by `pip install -e .`)
+  robots/                       one description per humanoid: g1.py, h1.py, t1.py, n1.py (spec.py: the format)
   envs/
-    pose_tracking.py            G1-pose-tracking: the whole-body pose-tracking environment
+    pose_tracking.py            G1-pose-tracking: the whole-body pose-tracking environment (robot=, layout=)
     live.py                     G1-pose-live: the same, following a live reference (e.g. a camera)
-    whole_body.py               29-joint G1 base: PD control, joint armature, torque limits
+    whole_body.py               HumanoidEnv (G1Env for the G1): PD control, joint armature, torque limits
     walker.py                   G1-walker: the 12 leg motors only, for Unitree's walking policy
   motion/
     library.py                  reference-motion files (.npz): load, save, merge
@@ -43,7 +45,8 @@ src/G1_tele/                    the Python package (installed by `pip install -e
     retarget.py                 turns tracker keypoints into a full robot pose
     human.py                    turns MediaPipe body landmarks into robot keypoints
     recording.py                cleans camera recordings into training motions
-    kinematics.py               forward kinematics and the keypoint definitions
+    kinematics.py               forward kinematics, IK, and the robot measurements (soles, size, scale)
+    gait.py                     generates walking and turning motions (ZMP preview control)
   teleop.py                     person -> robot: find a torso, reset into their pose, follow them
   policies/
     pose_tracking.py            the actor-critic network used for training
@@ -51,6 +54,8 @@ src/G1_tele/                    the Python package (installed by `pip install -e
   assets/
     g1_description/             Unitree G1 models (MuJoCo .xml, .urdf) and meshes
     motions/synthetic.npz       the default motion library: 120 clips, 42.8 min
+    motions/<robot>/            other robots' libraries (make_motions.py --robot <robot>)
+    robots/<model>/             other robots' MuJoCo models (downloaded by examples/get_robots.py, not in git)
     motions/human/<name>/       your own recordings (record_motion.py), one file per slot
 examples/RL/
   live_pose.py                  the robot copies the person in front of your webcam
@@ -60,7 +65,9 @@ examples/RL/
   run_logging.py                logs, evaluation videos, checkpoints and the curriculum
   gif_maker.py                  turns checkpoints into GIFs (no window needed)
   make_motions.py               builds or extends the motion library
+  check_robot.py                checks a robot description against its model and shows what was measured
   show_policy.py                minimal example of calling visualise() from your own script
+examples/get_robots.py          downloads the H1, T1 and N1 models from MuJoCo Menagerie
 examples/keyboard_control.py    drive the G1 with the arrow keys using the pretrained walking policy
 examples/live_pose.py           a copy of examples/RL/live_pose.py
 logs/
@@ -144,6 +151,66 @@ python examples/RL/live_pose.py
 ```
 
 Run all commands from the repository root: runs are written to `logs/` in the current folder.
+
+## Other humanoids (H1, T1, N1, ...)
+
+The whole pipeline - motion generation, retargeting, the environment, training, evaluation, the webcam demo and recording - works for any humanoid described in `src/G1_tele/robots/`. Four are described:
+
+| Robot | `--robot` | Driven joints | Height | Leg vs G1 | Notes |
+|---|---|---|---|---|---|
+| Unitree G1 | `g1` | 23 of 29 (wrists held) | 1.3 m | 1.00 | the default; everything below works exactly as before |
+| Unitree H1 | `h1` | 19 | 1.8 m | 1.28 | no ankle roll joint: it shifts its weight by rolling its narrow feet |
+| Booster T1 | `t1` | 21 of 23 (head held) | 1.2 m | 0.82 | the base is the chest; arms point sideways at zero |
+| Fourier N1 | `n1` | 21 of 23 (wrists held) | 1.3 m | 0.91 | mesh soles, measured from the mesh |
+
+Everything the pipeline needs is measured from each model (sole contact points, ankle height, standing height, leg length, hip width). The motion generators were tuned on the G1, and their numbers are converted to each robot's size: heights bend the legs as much, step lengths, lifts and speeds scale with leg length, stance widths with hip width. Reward tolerances and termination limits scale the same way, pushes with body mass.
+
+### One robot
+
+```bash
+python examples/get_robots.py                                # once: the H1, T1 and N1 models (needs git)
+python examples/RL/check_robot.py h1 --motion --stand        # check the description, see what was measured
+python examples/RL/make_motions.py synth --robot h1          # -> src/G1_tele/assets/motions/h1/synthetic.npz
+python examples/RL/make_motions.py loco --robot h1           # walking clips (for train_locomotion.py)
+python examples/RL/train_pose_tracking.py check --robot h1
+python examples/RL/train_pose_tracking.py train --robot h1   # -> logs/pose_stage1_h1/
+python examples/RL/train_pose_tracking.py play --robot h1
+python examples/RL/live_pose.py --model logs/pose_stage1_h1/pose_stage1_h1
+```
+
+`train2`, `train_locomotion.py`, `finetune.py`, `record_motion.py` and `gif_maker.py` take the same `--robot` (or read the robot from the model's run). `make_motions.py synth --robot all` builds every robot's library in turn.
+
+### One policy for several robots
+
+```bash
+python examples/RL/train_pose_tracking.py train --robot g1,h1,t1,n1      # -> logs/pose_stage1_g1-h1-n1-t1/
+python examples/RL/live_pose.py --model logs/pose_stage1_g1-h1-n1-t1/pose_stage1_g1-h1-n1-t1 --robot t1
+```
+
+Several robots train one shared policy with `layout="universal"`. Every robot's joints are placed into the same 31 joint slots (left hip pitch, ..., right elbow, head pitch; see `robots/spec.py`), so the observation and action have the same size for every robot (322 and 31 with the default settings). In that layout:
+
+- joint angles are signed so that each slot turns the same way on every robot (worked out from the joint axes in the default pose),
+- slots a robot doesn't have, or doesn't drive, are zero in the observation and ignored in the action,
+- lengths (keypoints, heights, velocities) are divided by the robot's scale, so a person's pose looks alike to the policy whichever robot follows it,
+- a robot descriptor (which slots it drives, its leg and hip scale, its mass) tells the policy which body it is in.
+
+The parallel envs are shared out between the robots, and every robot gets its own evaluation: `eval_<robot>.csv`, `eval_<robot>/*` columns in `progress.csv`, `videos/<run>_<robot>_*.mp4`, and `track/fall_rate_<robot>`. A shared policy can be fine-tuned on one robot (`finetune.py --robot t1`) and still drives the others. `--layout universal` also works for a single robot, so a policy can be started on one and others added later.
+
+Native-layout policies (the default for one robot, and every G1 model so far) only work on the robot they were trained on.
+
+### Adding a robot
+
+1. Get a MuJoCo scene with the robot and a floor plane (Menagerie's `scene.xml` files have both).
+2. Describe it in `src/G1_tele/robots/<name>.py`, following `h1.py`: each driven joint and the slot it fills, its default (standing) pose, the 12 keypoint bodies (hands, elbows, shoulders, hips, knees, feet = ankles), the two foot bodies, and the base body. PD gains and torque limits can be left out when the model's actuators have them. `explore` gives the range of random arm and waist poses (for the left side). Register it in `robots/__init__.py`.
+3. `python examples/RL/check_robot.py <name> --motion --stand` checks every name against the model, shows the measured soles and size, the joint signs, makes a little of every motion kind and holds the default pose in the simulator.
+4. Make its motions and train as above.
+
+### Limitations
+
+- **Only the G1 has trained policies so far.** The H1, T1 and N1 descriptions, motion generation, retargeting and environments have been checked kinematically (feet planted and level, centre of mass over the feet, joint limits, retargeting error under 2 cm, the same observation size for every robot), but no policy has been trained on them yet, and their PD gains are first choices (from the makers' training code where available). Run `check_robot.py --stand` first; if a robot sags or shakes on PD alone, adjust its gains in its description.
+- **The H1 has no ankle roll joint**, so it can only shift its weight sideways by rolling its feet onto their edges. Its references allow that (a rolled sole edge can sit up to ~2 cm below the floor in the reference on one leg), and one-leg motions will be much harder for it than for the others.
+- **Joint ranges differ.** A pose the G1 reaches may be out of reach for another robot (e.g. the T1 and H1 can't raise an arm as far sideways): retargeting then gets as close as the joint limits allow, and `record_motion.py` drops frames that end up too far off (6 cm on the G1, scaled by size).
+- **Motion libraries must be made on a machine with MuJoCo** (self-collisions are checked while generating). Each `.npz` records which robot it is for, and loading it for another robot is refused with a clear message.
 
 ## Examples
 
@@ -499,6 +566,7 @@ python examples/RL/make_motions.py merge combined.npz my_synthetic.npz my_clip.n
 - **Keypoint input** for `keypoints` is an `.npz` with one `(T, 3)` array per keypoint name. Use the names `left_hand`, `right_hand`, `left_foot` and `right_foot`, plus optionally the elbows, knees, hips and shoulders. Positions must already be in the robot's heading frame and at robot scale.
 - **Retargeting** solves inverse kinematics for every frame (about 2 ms per frame) and prints the mean and maximum keypoint error of each clip.
 - **Training on your library:** set `motion_file` in `COMMON` in `train_pose_tracking.py` to its path, or to a list of paths.
+- **Other robots:** add `--robot h1` (or `t1`, `n1`, `all`) to any command; without `--out` the result goes to that robot's own `motions/<robot>/` files, which training uses by default. See [Other humanoids](#other-humanoids-h1-t1-n1-).
 - **Curriculum and your clips:** clips made with `keypoints` get the kind `keypoints`, which the curriculum never locks, so they are trained on from the start. Clips made with `hands` get the kind `upper`.
 
 ### Drive the G1 with the keyboard (`keyboard_control.py`)

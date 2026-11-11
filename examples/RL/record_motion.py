@@ -7,6 +7,8 @@ examples/RL/record_motion.py  -  record your own motions with a webcam, as train
     python examples/RL/record_motion.py --name dance --video dance.mp4  # a video file instead of the webcam
     python examples/RL/record_motion.py --reprocess src/G1_tele/assets/motions/human/lab_day1   # clean again
     python examples/RL/record_motion.py --name walks --walk             # keep where you walk and turn too
+    python examples/RL/record_motion.py --name lab_day1 --robot h1      # retarget onto another robot
+                                                  # -> src/G1_tele/assets/motions/h1/human/lab_day1/
 
 It records by itself. Whenever every body point it needs is visible, the frames go into the current
 "slot". When the person is lost (a needed point missing, or nobody found) for longer than --max-gap
@@ -55,7 +57,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from live_pose import PoseCamera, status_bar                                  # noqa: E402
 
 import G1_tele                                                                # noqa: E402,F401
-from G1_tele.motion.kinematics import G1Kinematics                             # noqa: E402
+from G1_tele.motion.kinematics import Kinematics                               # noqa: E402
+from G1_tele.motion.library import MOTION_DIR                                  # noqa: E402
 from G1_tele.motion.recording import (DEFAULTS, FPS, HUMAN_DIR, clean_take, describe, load_raw,  # noqa: E402
                                       missing_landmarks, save_clips, save_raw)
 
@@ -73,7 +76,7 @@ def next_slot_number(folder):
 
 
 # ------------------------------------------------------------------ cleaning + saving, in the background
-_KIN = None
+_KIN = {}
 
 
 def raw_take(slot, name, parts):
@@ -81,18 +84,17 @@ def raw_take(slot, name, parts):
             "level_from": slot["level_from"], "name": name, "parts": parts}
 
 
-def clean_and_save(folder, name, slot, parts, kind, keep_raw, settings, walk=False, hfov=65.0):
+def clean_and_save(folder, name, slot, parts, kind, keep_raw, settings, walk=False, hfov=65.0, robot="g1"):
     """Runs in a separate process (inverse kinematics is heavy; a thread would slow the camera)."""
-    global _KIN
-    if _KIN is None:
-        _KIN = G1Kinematics()
+    if robot not in _KIN:
+        _KIN[robot] = Kinematics(robot)
     folder = Path(folder)
     times, world, vis, image = (np.array(slot[k]) for k in ("times", "world", "visibility", "image"))
     clips, rep = clean_take(times, world, vis, parts=parts, name=name, level_from=slot["level_from"],
-                            kin=_KIN, image=image, aspect=slot["aspect"], walk=walk, hfov=hfov, **settings)
+                            kin=_KIN[robot], image=image, aspect=slot["aspect"], walk=walk, hfov=hfov, **settings)
     folder.mkdir(parents=True, exist_ok=True)
     if clips:
-        save_clips(folder / f"{name}.npz", clips, kind=kind)
+        save_clips(folder / f"{name}.npz", clips, kind=kind, robot=robot)
     if keep_raw:
         save_raw(folder / f"{name}_raw.npz", [raw_take(slot, name, parts)])
     return rep, bool(clips)
@@ -117,7 +119,7 @@ class SlotWriter(threading.Thread):
 
     def _clean(self, name, slot):
         args = (str(self.folder), name, slot, self.a.parts, self.a.kind, not self.a.no_raw, settings_from(self.a),
-                self.a.walk, self.a.fov)
+                self.a.walk, self.a.fov, self.a.robot)
         try:
             return self.pool.submit(clean_and_save, *args).result()
         except Exception:                                   # noqa: BLE001  the worker died: one fresh try
@@ -303,7 +305,7 @@ def reprocess(a):
     raws = sorted(target.rglob("*_raw.npz")) if target.is_dir() else [target]
     if not raws:
         raise SystemExit(f"no *_raw.npz files in {target}")
-    kin, total, kept_files = G1Kinematics(), 0.0, 0
+    kin, total, kept_files = Kinematics(a.robot), 0.0, 0
     for raw in raws:
         out = raw.with_name(raw.name.replace("_raw.npz", ".npz"))
         clips = []
@@ -318,7 +320,7 @@ def reprocess(a):
             print(f"{tk['name']}: {describe(rep)}")
             clips += c
         if clips:
-            save_clips(out, clips, kind=a.kind)
+            save_clips(out, clips, kind=a.kind, robot=a.robot)
             total += sum(len(c["joints"]) for c in clips) / FPS
             kept_files += 1
         elif out.exists():
@@ -329,7 +331,9 @@ def reprocess(a):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--name", default=None, help="folder name for this recording (under --out-dir)")
-    ap.add_argument("--out-dir", default=str(HUMAN_DIR), help="where the folders go")
+    ap.add_argument("--robot", default="g1", help="robot to retarget the motions onto (default g1)")
+    ap.add_argument("--out-dir", default=None,
+                    help="where the folders go (default motions/human, or motions/<robot>/human for other robots)")
     ap.add_argument("--parts", default=None, choices=("full", "upper"),
                     help="full body (default), or upper body only with the legs kept standing")
     ap.add_argument("--kind", default=None,
@@ -362,6 +366,11 @@ def main():
     g.add_argument("--max-ik-err", type=float, default=None, help="largest IK error kept (m)")
     g.add_argument("--max-joint-speed", type=float, default=None, help="fastest joint movement kept (rad/s)")
     a = ap.parse_args()
+    from G1_tele.robots import ROBOTS
+    if a.robot not in ROBOTS:
+        ap.error(f"unknown robot {a.robot}; known: {sorted(ROBOTS)}")
+    if a.out_dir is None:
+        a.out_dir = str(HUMAN_DIR if a.robot == "g1" else MOTION_DIR / a.robot / "human")
     a.kind = a.kind or ("human_walk" if a.walk else "human")
     a.max_gap_slot = a.max_gap
     if a.reprocess:

@@ -3,8 +3,11 @@ Motion library: a set of reference clips stored as full robot configurations.
 
 File format (.npz)
 ------------------
-    root     (N, 7)  float32   pelvis position (world, m) + quaternion (w, x, y, z)
-    joints   (N, 29) float32   the 29 body joints in G1_tele.envs.whole_body.BODY_JOINTS order (rad)
+    root     (N, 7)  float32   base position (world, m) + quaternion (w, x, y, z)
+    joints   (N, J)  float32   the robot's J body joints in its RobotSpec order (rad); the G1's 29 are
+                               G1_tele.envs.whole_body.BODY_JOINTS
+    joint_names (J,) str       those joints' names (checked when the file is loaded)
+    robot    ()      str       which robot the clips are for (files without it are G1 files)
     starts   (C+1,)  int       clip c is rows starts[c]:starts[c+1]
     fps      ()      float     frame rate of every clip
     names    (C,)    str       optional clip names
@@ -17,16 +20,32 @@ from pathlib import Path
 
 import numpy as np
 
-from G1_tele.envs.whole_body import BODY_JOINTS
 from G1_tele.motion.kinematics import slerp
+from G1_tele.robots import get_robot
 
 MOTION_DIR = Path(__file__).resolve().parent.parent / "assets" / "motions"
-DEFAULT_MOTIONS = MOTION_DIR / "synthetic.npz"
+DEFAULT_MOTIONS = MOTION_DIR / "synthetic.npz"    # the G1's; other robots: get_robot(name).motion_file
 LOCO_MOTIONS = MOTION_DIR / "locomotion.npz"      # walking and turning (make_motions.py loco)
 
 
-def save_library(path, clips, fps, names=None, kinds=None):
-    """clips: list of (root (T,7), joints (T,29)) pairs."""
+def default_motions(robot=None, loco=False):
+    """The robot's default motion library (synthetic poses, or walking with loco=True)."""
+    spec = get_robot(robot)
+    return Path(spec.loco_motion_file if loco else spec.motion_file)
+
+
+def library_robot(path):
+    """Name of the robot a motion file was made for ("g1" for files from before robots were added)."""
+    with np.load(path, allow_pickle=False) as f:
+        return str(f["robot"]) if "robot" in f else "g1"
+
+
+def save_library(path, clips, fps, names=None, kinds=None, robot=None):
+    """clips: list of (root (T,7), joints (T,J)) pairs, joints in the robot's RobotSpec order."""
+    spec = get_robot(robot)
+    J = {np.asarray(j).shape[1] for _, j in clips}
+    if J != {spec.n_joints}:
+        raise ValueError(f"{spec.name} has {spec.n_joints} joints but the clips have {sorted(J)}")
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     starts = np.cumsum([0] + [len(r) for r, _ in clips])
@@ -37,31 +56,45 @@ def save_library(path, clips, fps, names=None, kinds=None):
         starts=starts, fps=np.float32(fps),
         names=np.array(names if names is not None else [f"clip_{i}" for i in range(len(clips))]),
         kinds=np.array(kinds if kinds is not None else ["clip"] * len(clips)),
-        joint_names=np.array(BODY_JOINTS))
+        joint_names=np.array(spec.joint_names), robot=np.array(spec.name))
 
 
 def merge_libraries(out_path, *paths):
     clips, names, kinds, fps = [], [], [], None
+    robots = {library_robot(p) for p in paths}
+    if len(robots) > 1:
+        raise ValueError(f"can't merge motions of different robots: {sorted(robots)}")
+    robot = robots.pop()
     for p in paths:
-        lib = MotionLibrary(p)
+        lib = MotionLibrary(p, robot=robot)
         if fps is not None and abs(lib.fps - fps) > 1e-6:
             raise ValueError("all libraries must share the same fps")
         fps = lib.fps
         for c in range(lib.n_clips):
             clips.append((lib.root[lib.starts[c]:lib.starts[c + 1]], lib.joints[lib.starts[c]:lib.starts[c + 1]]))
         names += list(lib.names); kinds += list(lib.kinds)
-    save_library(out_path, clips, fps, names, kinds)
+    save_library(out_path, clips, fps, names, kinds, robot=robot)
 
 
 class MotionLibrary:
-    def __init__(self, paths):
+    """Clips for one robot. robot=None: the robot the (first) file says, else the G1."""
+
+    def __init__(self, paths, robot=None):
         if isinstance(paths, (str, Path)):
             paths = [paths]
+        paths = list(paths)
+        spec = get_robot(robot if robot is not None else library_robot(paths[0]))
+        self.robot = spec.name
+        self.joint_names = spec.joint_names
         roots, joints, starts, names, kinds, fps = [], [], [0], [], [], None
         for p in paths:
             f = np.load(p, allow_pickle=False)
-            if "joint_names" in f and list(f["joint_names"]) != BODY_JOINTS:
-                raise ValueError(f"{p}: joint order differs from whole_body.BODY_JOINTS")
+            r = str(f["robot"]) if "robot" in f else "g1"
+            if r != spec.name:
+                raise ValueError(f"{p} holds motions for the {r}, not the {spec.name} "
+                                 f"(make them with: python examples/RL/make_motions.py synth --robot {spec.name})")
+            if "joint_names" in f and list(f["joint_names"]) != list(spec.joint_names):
+                raise ValueError(f"{p}: joint order differs from the {spec.name}'s RobotSpec")
             if fps is not None and abs(float(f["fps"]) - fps) > 1e-6:
                 raise ValueError("all motion files must share the same fps")
             fps = float(f["fps"])
@@ -99,7 +132,7 @@ class MotionLibrary:
         return self.starts[c] + k, self.starts[c] + k2, x - k
 
     def frame(self, c, t):
-        """Interpolated (root (7,), joints (29,)) at time t (clamped to the clip)."""
+        """Interpolated (root (7,), joints (J,)) at time t (clamped to the clip)."""
         i, j, f = self._idx(c, t)
         root = np.empty(7)
         root[:3] = (1 - f) * self.root[i, :3] + f * self.root[j, :3]
@@ -107,7 +140,7 @@ class MotionLibrary:
         return root, (1 - f) * self.joints[i] + f * self.joints[j]
 
     def velocity(self, c, t):
-        """(root linear vel world (3,), root angular vel body frame (3,), joint vel (29,)) at t."""
+        """(root linear vel world (3,), root angular vel body frame (3,), joint vel (J,)) at t."""
         h = 1.0 / self.fps
         t0 = min(max(t, 0.0), self.duration(c) - h) if self.duration(c) > h else 0.0
         r0, j0 = self.frame(c, t0)

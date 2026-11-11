@@ -78,7 +78,7 @@ from stable_baselines3 import PPO        # noqa: E402
 from stable_baselines3.common.logger import configure  # noqa: E402
 from stable_baselines3.common.vec_env import VecNormalize  # noqa: E402
 
-from G1_tele.motion.library import DEFAULT_MOTIONS, LOCO_MOTIONS, MotionLibrary  # noqa: E402
+from G1_tele.motion.library import DEFAULT_MOTIONS, LOCO_MOTIONS, MotionLibrary, default_motions  # noqa: E402,F401
 from G1_tele.policies.pose_tracking import PoseTrackingPolicy  # noqa: E402
 from G1_tele.policies.widen import floor_log_std, widen_state_dict, widen_stats  # noqa: E402
 
@@ -92,13 +92,14 @@ STATS_STEPS = 3000                                  # env steps used to measure 
 
 
 # ------------------------------------------------------------------ motions
-def motion_list(extra):
-    if not LOCO_MOTIONS.exists():
-        raise SystemExit(f"{LOCO_MOTIONS} is missing - make it first:  python examples/RL/make_motions.py loco")
-    base = [DEFAULT_MOTIONS.resolve(), LOCO_MOTIONS.resolve()]
+def motion_list(extra, robot="g1"):
+    base = [default_motions(robot).resolve(), default_motions(robot, loco=True).resolve()]
+    for f, what in zip(base, ("synth", "loco")):
+        if not f.exists():
+            raise SystemExit(f"{f} is missing - make it first:  python examples/RL/make_motions.py {what} --robot {robot}")
     more = [f for f in (motion_files(extra) if extra else []) if f not in base]
     try:
-        lib = MotionLibrary(base + more)
+        lib = MotionLibrary(base + more, robot=robot)
     except ValueError as e:
         raise SystemExit(f"can't combine the motion files: {e}")
     return base + more, lib
@@ -233,20 +234,39 @@ def evaluate(model, venv, env_kwargs, episodes_per_kind=4, seconds=10.0):
 
 
 # ------------------------------------------------------------------ train / dry run / play
+def robots_and_layout(a, base):
+    """Robots to train / play on and the layout: --robot / --layout, else what the starting model was
+    trained with (its run's config.json), else the G1."""
+    cfg = T.run_config(base) if base else {}
+    robots = T.parse_robots(a.robot) if getattr(a, "robot", None) else (cfg.get("robots") or ["g1"])
+    layout = getattr(a, "layout", None) or cfg.get("layout") or ("universal" if len(robots) > 1 else "native")
+    if len(robots) > 1 and layout != "universal":
+        raise SystemExit("several robots need --layout universal")
+    if len(robots) > 1 and getattr(a, "motions", None):
+        raise SystemExit("--motions works with one robot at a time (motion files belong to one robot)")
+    return robots, layout
+
+
 def train(a):
-    files, lib = motion_list(a.motions)
-    env_kwargs = {"motion_file": [str(f) for f in files]}
+    base = None if a.scratch else model_base(a.model)
+    robots, layout = robots_and_layout(a, base)
+    files, lib = motion_list(a.motions, robots[0])
+    for r in robots[1:]:
+        motion_list(None, r)                                 # every robot needs its motions
+    # single-env helpers (dry run, widening, evaluation) use the first robot; the training envs all of them
+    env_kwargs = {"motion_file": [str(f) for f in files], "robot": robots[0], "layout": layout}
+    vec_kwargs = {"motion_file": env_kwargs["motion_file"]} if len(robots) == 1 else {}
     env_id = T.LOCO_ROBUST if a.robust else T.LOCO_TRAIN
     start = a.start_level or (START_SCRATCH if a.scratch else START_FROM_TRAINED)
     print_motions(files, lib, start)
     steps = parse_steps(a.steps or (STEPS_SCRATCH if a.scratch else STEPS_FROM))
-    base = None if a.scratch else model_base(a.model)
+    print(f"robots: {', '.join(robots)} ({layout} layout)")
 
     if a.dry_run:
-        venv = T.make_env(env_id, 1, **env_kwargs)
+        venv = T.make_env(env_id, 1, robots=robots[:1], layout=layout, **vec_kwargs)
     else:
         log_dir = prepare_run_dir(os.path.join(T.LOG_ROOT, a.name))
-        venv = T.make_env(env_id, a.n_envs, **env_kwargs)
+        venv = T.make_env(env_id, a.n_envs, robots=robots, layout=layout, **vec_kwargs)
     prev = None
     if a.scratch:
         lr = a.lr or LR_SCRATCH
@@ -286,19 +306,23 @@ def train(a):
     model.set_logger(configure(log_dir, fmt))
     save_config(log_dir, run=a.name, start=how, started_from=os.path.abspath(base) if base else None,
                 env_id=env_id, env_kwargs={**gym.spec(env_id).kwargs, **env_kwargs}, eval_env_id=T.LOCO_EVAL,
+                robots=robots, layout=layout,
                 n_envs=a.n_envs, total_timesteps=steps, ppo=T.PPO_KW, learning_rate=list(lr),
                 min_std=None if a.scratch else a.min_std, curriculum=dict(order=ORDER, start=start, threshold=THRESHOLD,
                                                                           state_from=prev),
                 video_every_pct=T.VIDEO_EVERY_PCT, checkpoint_every_pct=T.CHECKPOINT_EVERY_PCT,
                 eval_episodes_per_kind=a.eval_episodes, mujoco_gl=dict(GL_INFO))
-    recorder = PeriodicVideoEvalCallback(T.LOCO_EVAL, steps, log_dir, a.name, every_pct=T.VIDEO_EVERY_PCT,
-                                         video_seconds_per_kind=T.VIDEO_SECONDS_PER_KIND,
-                                         episodes_per_kind=a.eval_episodes, env_kwargs=env_kwargs)
+    multi = len(robots) > 1
+    recorders = [PeriodicVideoEvalCallback(T.LOCO_EVAL, steps, log_dir, a.name, every_pct=T.VIDEO_EVERY_PCT,
+                                           video_seconds_per_kind=T.VIDEO_SECONDS_PER_KIND,
+                                           episodes_per_kind=a.eval_episodes, tag=r if multi else None,
+                                           env_kwargs=env_kwargs if not multi else T.robot_kwargs(T.LOCO_EVAL, r, layout))
+                 for r in robots]
     callbacks = [TrackingStatsCallback(),
                  CurriculumCallback(log_dir, order=ORDER, start=start, threshold=THRESHOLD, state_from=prev,
                                     per_second=True),
                  PeriodicCheckpointCallback(steps, log_dir, a.name, every_pct=T.CHECKPOINT_EVERY_PCT),
-                 recorder]
+                 *recorders]
     print(f"training {a.name} ({how}) for {steps:,} steps -> {log_dir}/")
     finished = False
     try:
@@ -309,11 +333,13 @@ def train(a):
     model.save(os.path.join(log_dir, a.name))
     venv.save(os.path.join(log_dir, f"{a.name}_vecnormalize.pkl"))
     if not finished:
-        try:
-            recorder.record_now()
-        except Exception as e:                               # noqa: BLE001
-            print(f"[eval] final evaluation skipped: {e}")
-    recorder.close()
+        for recorder in recorders:
+            try:
+                recorder.record_now()
+            except Exception as e:                           # noqa: BLE001
+                print(f"[eval] final evaluation skipped: {e}")
+    for recorder in recorders:
+        recorder.close()
     venv.close()
     print(f"Everything for this run is in {log_dir}/  - try it live: "
           f"python examples/RL/live_pose.py --model {os.path.join(log_dir, a.name)}")
@@ -322,12 +348,13 @@ def train(a):
 def play(a):
     import mujoco
     import mujoco.viewer
-    files, _ = motion_list(a.motions)
+    base = model_base(a.model)
+    robots, layout = robots_and_layout(a, base)
+    files, _ = motion_list(a.motions, robots[0])
     kw = {"motion_file": [str(f) for f in files]}
     if a.kind:
         kw["kind_weights"] = {a.kind: 1.0}
-    base = model_base(a.model)
-    venv = T.make_env(T.LOCO_EVAL, 1, **kw)
+    venv = T.make_env(T.LOCO_EVAL, 1, robots=robots[:1], layout=layout, **kw)
     venv = VecNormalize.load(base + "_vecnormalize.pkl", venv)
     venv.training, venv.norm_reward = False, False
     model = PPO.load(base, device="cpu")
@@ -363,12 +390,18 @@ def main():
         ap.add_argument("--kind", default=None, help="only this clip kind (turn, walk, loco, step, ...)")
         ap.add_argument("--motions", nargs="*", default=None, help="extra motion files the model was trained with")
         ap.add_argument("--seconds", type=float, default=None)
+        ap.add_argument("--robot", default=None, help="robot to play on (default: the model's first robot)")
+        ap.add_argument("--layout", choices=["native", "universal"], default=None)
         return play(ap.parse_args(sys.argv[2:]))
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     src = ap.add_mutually_exclusive_group(required=True)
     src.add_argument("--from", dest="model", help="trained model to start from (with or without .zip)")
     src.add_argument("--scratch", action="store_true", help="train from scratch through the whole curriculum")
     ap.add_argument("--name", required=True, help="name of the new run (logs/<name>/)")
+    ap.add_argument("--robot", default=None,
+                    help="robot, or a comma list for one shared policy (default: what --from was trained on, else g1)")
+    ap.add_argument("--layout", choices=["native", "universal"], default=None,
+                    help="default: the --from model's, else native for one robot and universal for several")
     ap.add_argument("--motions", nargs="*", default=None, help="extra .npz files or folders (e.g. your recordings)")
     ap.add_argument("--steps", default=None, help=f"training steps (default {STEPS_FROM} with --from, {STEPS_SCRATCH} from scratch)")
     ap.add_argument("--robust", action="store_true", help="pushes, friction changes and sensor noise (stage 2's)")

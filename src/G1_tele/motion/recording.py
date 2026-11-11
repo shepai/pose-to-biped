@@ -39,7 +39,7 @@ from pathlib import Path
 import numpy as np
 
 from G1_tele.motion.human import LM, HumanToRobot, place_in_room
-from G1_tele.motion.kinematics import ANKLE_HEIGHT, KEYPOINT_SETS, G1Kinematics
+from G1_tele.motion.kinematics import KEYPOINT_SETS, Kinematics
 from G1_tele.motion.library import MOTION_DIR, MotionLibrary, save_library
 from G1_tele.motion.retarget import KeypointRetargeter
 
@@ -90,18 +90,23 @@ def _split(mask):
 
 
 def clean_take(times, world, visibility, parts="full", name="take", level_from=None, kin=None,
-               com_weight=0.0, image=None, aspect=None, walk=False, hfov=65.0, **settings):
-    """Returns (clips, report). clips: list of dicts with root (T,7), joints (T,29), name, ik_err.
+               com_weight=0.0, image=None, aspect=None, walk=False, hfov=65.0, robot=None, **settings):
+    """Returns (clips, report). clips: list of dicts with root (T,7), joints (T,J), name, ik_err.
+    robot / kin: which robot to retarget onto (default the G1).
     level_from: landmarks (N, 33, 3) of the person standing upright (e.g. during a countdown), used
     to level the camera; if None, the first half second of good frames is used.
     walk: also keep where the person walked (needs image (T, 33, 2) and aspect = width / height)."""
+    kin = kin or Kinematics(robot)
     s = {**DEFAULTS, **settings}
+    for key in ("max_ik_err", "max_speed"):               # robot lengths / speeds: G1 numbers, scaled
+        if key not in settings or settings[key] is None:
+            s[key] = DEFAULTS[key] * kin.scale
     if walk and (image is None or not aspect):
         raise ValueError("walk=True needs the image landmarks and the image's aspect ratio "
                          "(recorded with record_motion.py from this version on)")
     times, world, vis = np.asarray(times, float), np.asarray(world, float), np.asarray(visibility, float)
-    kin = kin or G1Kinematics()
     conv = HumanToRobot(kin, s["min_visibility"])
+    A = kin.ankle_height
     T = len(times)
     report = {"seconds": float(times[-1] - times[0]) if T > 1 else 0.0, "frames": T, "missing_s": 0.0, "absent_s": 0.0,
               "jump_frames": 0, "unreachable_frames": 0, "too_fast_frames": 0, "short_s": 0.0, "clips": []}
@@ -202,7 +207,7 @@ def clean_take(times, world, visibility, parts="full", name="take", level_from=N
         X = _gaussian_smooth(X, s["smooth"] * FPS)
         for f in (NAMES.index("left_foot"), NAMES.index("right_foot")):  # keep planted feet on the floor
             z = X[:, f, 2]
-            X[:, f, 2] = np.where(z < ANKLE_HEIGHT + 0.01, ANKLE_HEIGHT, z)
+            X[:, f, 2] = np.where(z < A + 0.01 * kin.scale, A, z)
         ik = KeypointRetargeter(kin, com_weight=com_weight)
         roots, joints, errs = [], [], []
         for frame in X:
@@ -258,19 +263,19 @@ def describe(report):
 
 
 # ------------------------------------------------------------------ files
-def save_clips(path, clips, kind="human", keep_existing=None):
+def save_clips(path, clips, kind="human", keep_existing=None, robot=None):
     """Write clips as a motion library (50 Hz). keep_existing: clips already in the file to keep,
     as returned by load_clips()."""
     allc = list(keep_existing or []) + list(clips)
     save_library(path, [(c["root"], c["joints"]) for c in allc], FPS,
-                 names=[c["name"] for c in allc], kinds=[c.get("kind", kind) for c in allc])
+                 names=[c["name"] for c in allc], kinds=[c.get("kind", kind) for c in allc], robot=robot)
 
 
-def load_clips(path):
+def load_clips(path, robot=None):
     """Clips of an existing motion library as dicts (for appending to it)."""
     if not Path(path).exists():
         return []
-    lib = MotionLibrary(path)
+    lib = MotionLibrary(path, robot=robot)
     return [{"root": lib.root[lib.starts[c]:lib.starts[c + 1]], "joints": lib.joints[lib.starts[c]:lib.starts[c + 1]],
              "name": str(lib.names[c]), "kind": str(lib.kinds[c])} for c in range(lib.n_clips)]
 

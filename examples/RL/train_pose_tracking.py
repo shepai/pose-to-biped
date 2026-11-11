@@ -1,5 +1,5 @@
 """
-examples/train_pose_tracking.py  -  whole-body pose tracking for the G1 with Stable-Baselines3 PPO
+examples/train_pose_tracking.py  -  whole-body pose tracking with Stable-Baselines3 PPO
 
     python train_pose_tracking.py check      # 20 s sanity check of the env (no training)
     python train_pose_tracking.py video      # test video recording: which OpenGL backend works, writes a clip
@@ -7,6 +7,20 @@ examples/train_pose_tracking.py  -  whole-body pose tracking for the G1 with Sta
     python train_pose_tracking.py train2     # stage 2: resume stage 1 + pushes, friction, sensor noise
     python train_pose_tracking.py play       # watch stage 1 (play2 for stage 2) - spheres are the targets
     python train_pose_tracking.py play logs/pose_stage1/checkpoints/pose_stage1_050pct_30.0M.zip
+
+Other robots (G1_tele.robots; make their motions first with make_motions.py synth --robot <name>):
+    python train_pose_tracking.py train --robot h1               # one robot -> logs/pose_stage1_h1/
+    python train_pose_tracking.py train --robot g1,h1,t1,n1      # ONE policy for all four -> logs/pose_stage1_g1-h1-n1-t1/
+    python train_pose_tracking.py train2 --robot h1              # stage 2 resumes logs/pose_stage1_h1
+    python train_pose_tracking.py play --robot t1 logs/pose_stage1_g1-h1-n1-t1/pose_stage1_g1-h1-n1-t1
+  --robot a,b,...  several robots train one shared policy: the env uses layout="universal" (same
+                   observation and action size for every robot), the parallel envs are shared out
+                   between the robots, and every robot gets its own evaluation (eval_<robot>.csv,
+                   eval_<robot>/* columns, videos/<run>_<robot>_*.mp4) and track/fall_rate_<robot>.
+  --layout universal  use the shared layout for a single robot too (e.g. to fine-tune a multi-robot
+                   policy on one robot, or to add a robot to one later)
+  --run NAME  --steps 60M  --envs 16  --from RUN (train2: the stage 1 run to resume)
+  play/check/video take --robot as well; play reads the robots and layout from the run's config.json.
 
 Everything a run produces goes to logs/<run>/ (see run_logging.py):
     progress.csv, eval.csv, config.json, videos/ (every VIDEO_EVERY_PCT %), checkpoints/ (every
@@ -27,6 +41,7 @@ What to watch in logs/<run>/progress.csv (or TensorBoard if installed):
 The env ids are registered at the TOP LEVEL of this file because SubprocVecEnv workers need them in
 every process.
 """
+import functools
 import os
 import sys
 import time
@@ -37,7 +52,8 @@ from gymnasium.envs.registration import register
 from stable_baselines3 import PPO
 from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.logger import configure
-from stable_baselines3.common.vec_env import SubprocVecEnv, VecNormalize
+from stable_baselines3.common.monitor import Monitor
+from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecNormalize
 
 from run_logging import (GL_INFO, CurriculumCallback, PeriodicCheckpointCallback, PeriodicVideoEvalCallback,
                          TrackingStatsCallback, configure_mujoco_gl, prepare_run_dir, save_config, write_video)
@@ -103,15 +119,72 @@ def linear_schedule(start, end):
     return lambda progress_remaining: end + (start - end) * progress_remaining
 
 
-def make_env(env_name, n_envs, **env_kwargs):
-    return make_vec_env(env_name, n_envs=n_envs, env_kwargs=env_kwargs or None,
-                        vec_env_cls=SubprocVecEnv if n_envs > 1 else None)
+LOCO_IDS = (LOCO_TRAIN, LOCO_ROBUST, LOCO_EVAL)
 
 
-def run(env_name, run_name, total_timesteps, n_envs=N_ENVS, init_run=None):
+def robot_kwargs(env_name, robot, layout="native"):
+    """Env kwargs for one robot: which robot, the layout, and (walking envs) its motion files."""
+    from G1_tele.motion.library import default_motions
+    kw = {"robot": robot, "layout": layout}
+    if env_name in LOCO_IDS:
+        kw["motion_file"] = [str(default_motions(robot)), str(default_motions(robot, loco=True))]
+    return kw
+
+
+def _make_one(env_name, kwargs):
+    return Monitor(gym.make(env_name, **kwargs))
+
+
+def make_env(env_name, n_envs, robots=None, layout=None, **env_kwargs):
+    """n_envs parallel envs. robots=None: the env's own kwargs (the G1), as before. robots=[...]:
+    the envs are shared out between the robots round-robin (with 16 envs and 3 robots, 6/5/5)."""
+    if robots is None:
+        return make_vec_env(env_name, n_envs=n_envs, env_kwargs=env_kwargs or None,
+                            vec_env_cls=SubprocVecEnv if n_envs > 1 else None)
+    robots = list(robots)
+    if n_envs < len(robots):
+        raise SystemExit(f"{len(robots)} robots need at least as many envs (--envs {len(robots)})")
+    layout = layout or ("universal" if len(robots) > 1 else "native")
+    fns = [functools.partial(_make_one, env_name, {**robot_kwargs(env_name, robots[i % len(robots)], layout), **env_kwargs})
+           for i in range(n_envs)]
+    return SubprocVecEnv(fns) if n_envs > 1 else DummyVecEnv(fns)
+
+
+def parse_robots(text):
+    robots = [r.strip().lower() for r in str(text).split(",") if r.strip()]
+    from G1_tele.robots import ROBOTS
+    bad = [r for r in robots if r not in ROBOTS]
+    if bad:
+        raise SystemExit(f"unknown robot(s) {bad}; known: {sorted(ROBOTS)}")
+    return robots
+
+
+def default_run_name(stage, robots, layout):
+    """pose_stage1 for the G1 alone (as before), pose_stage1_h1, pose_stage1_g1-h1-t1 (sorted), ..."""
+    if robots == ["g1"] and layout == "native":
+        return stage
+    tag = "-".join(sorted(robots))
+    return f"{stage}_{tag}" + ("_universal" if len(robots) == 1 and layout == "universal" else "")
+
+
+def check_motions(robots, env_name=STAGE1):
+    """Stop early with a clear message if a robot has no motion library yet."""
+    from G1_tele.motion.library import default_motions
+    for r in robots:
+        files = [default_motions(r)] + ([default_motions(r, loco=True)] if env_name in LOCO_IDS else [])
+        for f in files:
+            if not f.exists():
+                what = "loco" if "locomotion" in f.name else "synth"
+                raise SystemExit(f"{f} is missing - make it first:  python examples/RL/make_motions.py {what} --robot {r}")
+
+
+def run(env_name, run_name, total_timesteps, n_envs=N_ENVS, init_run=None, robots=("g1",), layout="native"):
+    robots = list(robots)
+    multi = len(robots) > 1
+    check_motions(robots, env_name)
     log_dir = prepare_run_dir(os.path.join(LOG_ROOT, run_name))
 
-    venv = make_env(env_name, n_envs)
+    venv = make_env(env_name, n_envs, robots=robots, layout=layout)
     if init_run:                                             # stage 2: reuse weights + normalisation stats
         src = os.path.join(LOG_ROOT, init_run, init_run)
         venv = VecNormalize.load(f"{src}_vecnormalize.pkl", venv)
@@ -132,18 +205,21 @@ def run(env_name, run_name, total_timesteps, n_envs=N_ENVS, init_run=None):
         pass
     model.set_logger(configure(log_dir, fmt))
     save_config(log_dir, run=run_name, env_id=env_name, env_kwargs=gym.spec(env_name).kwargs,
+                robots=robots, layout=layout,
                 eval_env_id=EVAL_ID, n_envs=n_envs, total_timesteps=total_timesteps, init_run=init_run,
                 ppo=PPO_KW, policy=POLICY_KW, learning_rate=lr, curriculum=CURRICULUM,
                 curriculum_start=CURRICULUM_START, curriculum_threshold=CURRICULUM_THRESHOLD,
                 video_every_pct=VIDEO_EVERY_PCT, checkpoint_every_pct=CHECKPOINT_EVERY_PCT,
                 eval_episodes_per_kind=EVAL_EPISODES_PER_KIND, mujoco_gl=dict(GL_INFO))
 
-    recorder = PeriodicVideoEvalCallback(EVAL_ID, total_timesteps, log_dir, run_name, every_pct=VIDEO_EVERY_PCT,
-                                         video_seconds_per_kind=VIDEO_SECONDS_PER_KIND,
-                                         episodes_per_kind=EVAL_EPISODES_PER_KIND)
+    recorders = [PeriodicVideoEvalCallback(EVAL_ID, total_timesteps, log_dir, run_name, every_pct=VIDEO_EVERY_PCT,
+                                           video_seconds_per_kind=VIDEO_SECONDS_PER_KIND,
+                                           episodes_per_kind=EVAL_EPISODES_PER_KIND,
+                                           env_kwargs=robot_kwargs(EVAL_ID, r, layout), tag=r if multi else None)
+                 for r in robots]
     callbacks = [TrackingStatsCallback(),
                  PeriodicCheckpointCallback(total_timesteps, log_dir, run_name, every_pct=CHECKPOINT_EVERY_PCT),
-                 recorder]
+                 *recorders]
     if CURRICULUM:
         prev = os.path.join(LOG_ROOT, init_run, "curriculum.json") if init_run else None
         callbacks.insert(1, CurriculumCallback(log_dir, start=CURRICULUM_START, threshold=CURRICULUM_THRESHOLD,
@@ -158,29 +234,48 @@ def run(env_name, run_name, total_timesteps, n_envs=N_ENVS, init_run=None):
     model.save(os.path.join(log_dir, run_name))
     venv.save(os.path.join(log_dir, f"{run_name}_vecnormalize.pkl"))
     if not finished:                                         # final video/eval of what was saved
-        try:
-            recorder.record_now()
-        except Exception as e:                               # noqa: BLE001
-            print(f"[eval] final evaluation skipped: {e}")
-    recorder.close()
+        for recorder in recorders:
+            try:
+                recorder.record_now()
+            except Exception as e:                           # noqa: BLE001
+                print(f"[eval] final evaluation skipped: {e}")
+    for recorder in recorders:
+        recorder.close()
     venv.close()
     print(f"Everything for this run is in {log_dir}/")
 
 
-def load_policy(model_path, env_name):
+def run_config(model_path):
+    """The config.json of the run a model or checkpoint belongs to ({} if there is none)."""
+    import json
+    d = os.path.dirname(os.path.abspath(model_path))
+    for folder in (d, os.path.dirname(d)):                   # logs/<run>/ or logs/<run>/checkpoints/
+        f = os.path.join(folder, "config.json")
+        if os.path.exists(f):
+            with open(f) as fh:
+                return json.load(fh)
+    return {}
+
+
+def load_policy(model_path, env_name, robot=None):
     """Model + a VecNormalize wrapper holding the training statistics (needed to normalise obs).
-    model_path: logs/<run>/<run>(.zip) or any checkpoint zip; its _vecnormalize.pkl sits next to it."""
+    model_path: logs/<run>/<run>(.zip) or any checkpoint zip; its _vecnormalize.pkl sits next to it.
+    robot: which robot to run it on (default: the run's first robot, from its config.json)."""
     base = model_path[:-4] if model_path.endswith(".zip") else model_path
-    venv = make_env(env_name, 1, assist=0.0)                 # never assist when evaluating
+    cfg = run_config(base)
+    robots, layout = cfg.get("robots") or ["g1"], cfg.get("layout") or "native"
+    if robot is not None and robot not in robots and layout != "universal":
+        raise SystemExit(f"{base} was trained on {robots} with the native layout; it can't drive the {robot}")
+    venv = make_env(env_name, 1, robots=[robot or robots[0]], layout=layout, assist=0.0)   # never assist
     venv = VecNormalize.load(f"{base}_vecnormalize.pkl", venv)
     venv.training, venv.norm_reward = False, False
     return PPO.load(base, device="cpu"), venv
 
 
-def visualise(env_name, model_path, seconds=None):
+def visualise(env_name, model_path, seconds=None, robot=None):
     import mujoco
     import mujoco.viewer
-    model, venv = load_policy(model_path, env_name)
+    model, venv = load_policy(model_path, env_name, robot)
     raw = venv.venv.envs[0].unwrapped
     obs = venv.reset()
     with mujoco.viewer.launch_passive(raw.model, raw.data) as viewer:
@@ -199,10 +294,17 @@ def visualise(env_name, model_path, seconds=None):
     venv.close()
 
 
-def check():
-    env = gym.make(STAGE1, assist=0.0).unwrapped
-    print(f"obs {env.observation_space.shape} (actor sees the first {env.n_actor_obs}), action {env.action_space.shape}, "
-          f"{env.lib.n_clips} clips, {sum(env.lib.duration(c) for c in range(env.lib.n_clips)) / 60:.1f} min of motion")
+def check(robots=("g1",), layout="native"):
+    check_motions(robots)
+    for r in robots:
+        _check_one(r, layout)
+
+
+def _check_one(robot, layout):
+    env = gym.make(STAGE1, assist=0.0, **robot_kwargs(STAGE1, robot, layout)).unwrapped
+    print(f"[{robot}, {layout}] obs {env.observation_space.shape} (actor sees the first {env.n_actor_obs}), "
+          f"action {env.action_space.shape}, {env.lib.n_clips} clips, "
+          f"{sum(env.lib.duration(c) for c in range(env.lib.n_clips)) / 60:.1f} min of motion")
     lens, t0, n = [], time.time(), 0
     for ep in range(10):
         env.reset(seed=ep)
@@ -307,19 +409,46 @@ def video_check():
               "   then run this check again. Training itself works without videos.")
 
 
-if __name__ == "__main__":
-    mode = sys.argv[1] if len(sys.argv) > 1 else "train"
-    if mode == "check":
-        check()
-    elif mode == "video":
+def _parse_steps(text):
+    t = str(text).strip().upper()
+    mult = {"K": 1e3, "M": 1e6, "G": 1e9}.get(t[-1:], 1)
+    return int(float(t[:-1] if t[-1:] in "KMG" else t) * mult)
+
+
+def main(argv):
+    import argparse
+    p = argparse.ArgumentParser(description="pose tracking with PPO", usage=__doc__)
+    p.add_argument("mode", nargs="?", default="train", choices=["check", "video", "train", "train2", "play", "play2"])
+    p.add_argument("model", nargs="?", help="play: a model or checkpoint (default: the run's final model)")
+    p.add_argument("--robot", default=None, help="robot, or a comma list to train one policy on several")
+    p.add_argument("--layout", choices=["native", "universal"], default=None,
+                   help="observation layout (default: native for one robot, universal for several)")
+    p.add_argument("--run", default=None, help="run name (default: pose_stage1[_<robots>])")
+    p.add_argument("--from", dest="init_run", default=None, help="train2: the stage 1 run to resume")
+    p.add_argument("--steps", type=_parse_steps, default=None, help="e.g. 60M")
+    p.add_argument("--envs", type=int, default=N_ENVS, help="parallel envs")
+    a = p.parse_args(argv)
+    robots = parse_robots(a.robot) if a.robot else ["g1"]
+    layout = a.layout or ("universal" if len(robots) > 1 else "native")
+    if len(robots) > 1 and layout != "universal":
+        raise SystemExit("several robots need --layout universal (one observation size for all of them)")
+    if a.mode == "check":
+        check(robots, layout)
+    elif a.mode == "video":
         video_check()
-    elif mode == "train":
-        run(STAGE1, "pose_stage1", 60_000_000)
-    elif mode == "train2":
-        run(STAGE2, "pose_stage2", 40_000_000, init_run="pose_stage1")
-    elif mode in ("play", "play2"):
-        default = os.path.join(LOG_ROOT, "pose_stage1", "pose_stage1") if mode == "play" else \
-            os.path.join(LOG_ROOT, "pose_stage2", "pose_stage2")
-        visualise(EVAL_ID, sys.argv[2] if len(sys.argv) > 2 else default)
-    else:
-        raise SystemExit(__doc__)
+    elif a.mode == "train":
+        run(STAGE1, a.run or default_run_name("pose_stage1", robots, layout), a.steps or 60_000_000,
+            n_envs=a.envs, robots=robots, layout=layout)
+    elif a.mode == "train2":
+        init = a.init_run or default_run_name("pose_stage1", robots, layout)
+        run(STAGE2, a.run or default_run_name("pose_stage2", robots, layout), a.steps or 40_000_000,
+            n_envs=a.envs, init_run=init, robots=robots, layout=layout)
+    elif a.mode in ("play", "play2"):
+        stage = "pose_stage1" if a.mode == "play" else "pose_stage2"
+        name = a.run or default_run_name(stage, robots, layout)
+        visualise(EVAL_ID, a.model or os.path.join(LOG_ROOT, name, name),
+                  robot=robots[0] if a.robot else None)
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])
