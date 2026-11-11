@@ -13,7 +13,7 @@ One policy drives 23 of the G1's 29 joints (the wrists are held still). It is gi
 - [What's in the repository](#whats-in-the-repository)
 - [Installation](#installation)
 - [Quick start: watch a trained policy](#quick-start-watch-a-trained-policy)
-- [Other humanoids (H1, T1, N1, ...)](#other-humanoids-h1-t1-n1-)
+- [Other humanoids (H1, T1, N1, iCub, ...)](#other-humanoids-h1-t1-n1-icub-)
 - [Examples](#examples)
   - [Copy a person with your webcam](#copy-a-person-with-your-webcam-live_posepy)
   - [Record your own motions](#record-your-own-motions-record_motionpy)
@@ -67,7 +67,7 @@ examples/RL/
   make_motions.py               builds or extends the motion library
   check_robot.py                checks a robot description against its model and shows what was measured
   show_policy.py                minimal example of calling visualise() from your own script
-examples/get_robots.py          downloads the H1, T1 and N1 models from MuJoCo Menagerie
+examples/get_robots.py          downloads the H1, T1 and N1 models (MuJoCo Menagerie) and converts the iCub's URDF
 examples/keyboard_control.py    drive the G1 with the arrow keys using the pretrained walking policy
 examples/live_pose.py           a copy of examples/RL/live_pose.py
 logs/
@@ -152,9 +152,9 @@ python examples/RL/live_pose.py
 
 Run all commands from the repository root: runs are written to `logs/` in the current folder.
 
-## Other humanoids (H1, T1, N1, ...)
+## Other humanoids (H1, T1, N1, iCub, ...)
 
-The whole pipeline - motion generation, retargeting, the environment, training, evaluation, the webcam demo and recording - works for any humanoid described in `src/G1_tele/robots/`. Four are described:
+The whole pipeline - motion generation, retargeting, the environment, training, evaluation, the webcam demo and recording - works for any humanoid described in `src/G1_tele/robots/`. Five are described:
 
 | Robot | `--robot` | Driven joints | Height | Leg vs G1 | Notes |
 |---|---|---|---|---|---|
@@ -162,13 +162,14 @@ The whole pipeline - motion generation, retargeting, the environment, training, 
 | Unitree H1 | `h1` | 19 | 1.8 m | 1.28 | no ankle roll joint: it shifts its weight by rolling its narrow feet |
 | Booster T1 | `t1` | 21 of 23 (head held) | 1.2 m | 0.82 | the base is the chest; arms point sideways at zero |
 | Fourier N1 | `n1` | 21 of 23 (wrists held) | 1.3 m | 0.91 | mesh soles, measured from the mesh |
+| iCub 2.7 | `icub` | 23 of 31 (wrists, head held) | 1.05 m | 0.70 | converted from the iCub team's URDF; ankles bend only 0.61 rad, so it walks with straighter legs |
 
 Everything the pipeline needs is measured from each model (sole contact points, ankle height, standing height, leg length, hip width). The motion generators were tuned on the G1, and their numbers are converted to each robot's size: heights bend the legs as much, step lengths, lifts and speeds scale with leg length, stance widths with hip width. Reward tolerances and termination limits scale the same way, pushes with body mass.
 
 ### One robot
 
 ```bash
-python examples/get_robots.py                                # once: the H1, T1 and N1 models (needs git)
+python examples/get_robots.py                                # once: the H1, T1, N1 and iCub models (needs git)
 python examples/RL/check_robot.py h1 --motion --stand        # check the description, see what was measured
 python examples/RL/make_motions.py synth --robot h1          # -> src/G1_tele/assets/motions/h1/synthetic.npz
 python examples/RL/make_motions.py loco --robot h1           # walking clips (for train_locomotion.py)
@@ -200,14 +201,15 @@ Native-layout policies (the default for one robot, and every G1 model so far) on
 
 ### Adding a robot
 
-1. Get a MuJoCo scene with the robot and a floor plane (Menagerie's `scene.xml` files have both).
+1. Get a MuJoCo scene with the robot and a floor plane (Menagerie's `scene.xml` files have both). A robot that only comes as a URDF can be converted with `G1_tele.robots.urdf_to_mjcf.write_mjcf` (see `get_icub()` in `examples/get_robots.py`): it merges fixed links into their moving parents, turns the robot to face +x, adds motors, rotor inertia and a floor, and `add_rest_excludes` switches off contacts between links whose collision shapes already overlap when standing.
 2. Describe it in `src/G1_tele/robots/<name>.py`, following `h1.py`: each driven joint and the slot it fills, its default (standing) pose, the 12 keypoint bodies (hands, elbows, shoulders, hips, knees, feet = ankles), the two foot bodies, and the base body. PD gains and torque limits can be left out when the model's actuators have them. `explore` gives the range of random arm and waist poses (for the left side). Register it in `robots/__init__.py`.
 3. `python examples/RL/check_robot.py <name> --motion --stand` checks every name against the model, shows the measured soles and size, the joint signs, makes a little of every motion kind and holds the default pose in the simulator.
 4. Make its motions and train as above.
 
 ### Limitations
 
-- **Only the G1 has trained policies so far.** The H1, T1 and N1 descriptions, motion generation, retargeting and environments have been checked kinematically (feet planted and level, centre of mass over the feet, joint limits, retargeting error under 2 cm, the same observation size for every robot), but no policy has been trained on them yet, and their PD gains are first choices (from the makers' training code where available). Run `check_robot.py --stand` first; if a robot sags or shakes on PD alone, adjust its gains in its description.
+- **Only the G1 has trained policies so far.** The H1, T1, N1 and iCub descriptions, motion generation, retargeting and environments have been checked kinematically (feet planted and level, centre of mass over the feet, joint limits, retargeting error under 2 cm, the same observation size for every robot), but no policy has been trained on them yet, and their PD gains are first choices (from the makers' training code where available). Run `check_robot.py --stand` first; if a robot sags or shakes on PD alone, adjust its gains in its description.
+- **The iCub is converted from a URDF** (robotology/icub-models, CC BY-SA 4.0). The URDF has placeholder torque limits for the torso and arms and no rotor inertia, so those (and all of its PD gains) are this package's choices, from the motor sizes in the iCub design paper; see `robots/icub.py`. Its collision shapes are the URDF's meshes (MuJoCo uses their convex hulls), so `get_robots.py` should be run where MuJoCo is installed, to switch off contacts between links that overlap when standing.
 - **The H1 has no ankle roll joint**, so it can only shift its weight sideways by rolling its feet onto their edges. Its references allow that (a rolled sole edge can sit up to ~2 cm below the floor in the reference on one leg), and one-leg motions will be much harder for it than for the others.
 - **Joint ranges differ.** A pose the G1 reaches may be out of reach for another robot (e.g. the T1 and H1 can't raise an arm as far sideways): retargeting then gets as close as the joint limits allow, and `record_motion.py` drops frames that end up too far off (6 cm on the G1, scaled by size).
 - **Motion libraries must be made on a machine with MuJoCo** (self-collisions are checked while generating). Each `.npz` records which robot it is for, and loading it for another robot is refused with a clear message.
@@ -566,7 +568,7 @@ python examples/RL/make_motions.py merge combined.npz my_synthetic.npz my_clip.n
 - **Keypoint input** for `keypoints` is an `.npz` with one `(T, 3)` array per keypoint name. Use the names `left_hand`, `right_hand`, `left_foot` and `right_foot`, plus optionally the elbows, knees, hips and shoulders. Positions must already be in the robot's heading frame and at robot scale.
 - **Retargeting** solves inverse kinematics for every frame (about 2 ms per frame) and prints the mean and maximum keypoint error of each clip.
 - **Training on your library:** set `motion_file` in `COMMON` in `train_pose_tracking.py` to its path, or to a list of paths.
-- **Other robots:** add `--robot h1` (or `t1`, `n1`, `all`) to any command; without `--out` the result goes to that robot's own `motions/<robot>/` files, which training uses by default. See [Other humanoids](#other-humanoids-h1-t1-n1-).
+- **Other robots:** add `--robot h1` (or `t1`, `n1`, `all`) to any command; without `--out` the result goes to that robot's own `motions/<robot>/` files, which training uses by default. See [Other humanoids](#other-humanoids-h1-t1-n1-icub-).
 - **Curriculum and your clips:** clips made with `keypoints` get the kind `keypoints`, which the curriculum never locks, so they are trained on from the start. Clips made with `hands` get the kind `upper`.
 
 ### Drive the G1 with the keyboard (`keyboard_control.py`)

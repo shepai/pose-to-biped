@@ -13,8 +13,9 @@ from .g1 import G1
 from .h1 import H1
 from .t1 import T1
 from .n1 import N1
+from .icub import ICUB
 
-ROBOTS = {s.name: s for s in (G1, H1, T1, N1)}
+ROBOTS = {s.name: s for s in (G1, H1, T1, N1, ICUB)}
 DEFAULT_ROBOT = "g1"
 
 

@@ -141,6 +141,8 @@ class RobotSpec:
     stance_x: float = None                              # ankle x relative to the base in the default pose
     scale: float = None                                 # leg length relative to the G1 (lengths, heights, speeds)
     lateral_scale: float = None                         # hip width relative to the G1 (stance width, side steps)
+    gait_height: tuple = (0.70, 0.745)                  # walking base height range, in G1 terms (Kinematics.to_height):
+    #                                                     raise it for robots whose ankles can't bend far (less knee bend)
     # ---- random upper-body poses for the synthetic motions
     explore: dict = field(default_factory=dict)         # part ("shoulder_pitch", "waist_yaw") -> (lo, hi) rad,
     #                                                     written for the LEFT side

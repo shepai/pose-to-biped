@@ -192,7 +192,7 @@ class GaitGenerator:
         k = self.k
         p = dict(half_w=k.to_half_width(r.uniform(0.105, 0.13)), t_ss=r.uniform(0.42, 0.55),
                  t_ds=r.uniform(0.10, 0.16), lift=k.to_length(r.uniform(0.05, 0.08)),
-                 h=k.to_height(r.uniform(0.70, 0.745)))
+                 h=k.to_height(r.uniform(*k.spec.gait_height)))
         near = k.to_length(0.025)                               # "feet square under the body" tolerance
         cmd = self._commands(kind, n, hold)
         path = self._path(cmd)
