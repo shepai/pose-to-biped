@@ -2,7 +2,7 @@
 
 | Unitree G1 | Unitree H1 | Fourier N1 | iCub 2.7 |
 |:---:|:---:|:---:|:---:|
-| <img src="assets/pose_stage1_g1-h1-icub-n1-t1_g1_060pct_36.0M.gif" alt="Unitree G1 copying reference poses" width="220"> | <img src="assets/pose_stage1_g1-h1-icub-n1-t1_h1_060pct_36.0M.gif" alt="Unitree H1 copying reference poses" width="220"> | <img src="assets/pose_stage1_g1-h1-icub-n1-t1_n1_060pct_36.0M.gif" alt="Fourier N1 copying reference poses" width="220"> | <img src="assets/pose_stage1_g1-h1-icub-n1-t1_icub_060pct_36.0M.gif" alt="iCub copying reference poses" width="220"> |
+| <img src="assets/pose_stage1_g1-h1-icub-n1-t1_g1_060pct_36.0M.gif" alt="Unitree G1 copying reference poses" width="420"> | <img src="assets/pose_stage1_g1-h1-icub-n1-t1_h1_060pct_36.0M.gif" alt="Unitree H1 copying reference poses" width="420"> | <img src="assets/pose_stage1_g1-h1-icub-n1-t1_n1_060pct_36.0M.gif" alt="Fourier N1 copying reference poses" width="420"> | <img src="assets/pose_stage1_g1-h1-icub-n1-t1_icub_060pct_36.0M.gif" alt="iCub copying reference poses" width="420"> |
 
 *One shared policy driving every robot (`pose_stage1_g1-h1-icub-n1-t1`, 60 % of training, 36 M steps).*
 
