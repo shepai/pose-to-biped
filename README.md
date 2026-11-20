@@ -1,5 +1,11 @@
 # pose-to-biped
 
+| Unitree G1 | Unitree H1 | Fourier N1 | iCub 2.7 |
+|:---:|:---:|:---:|:---:|
+| <img src="assets/pose_stage1_g1-h1-icub-n1-t1_g1_060pct_36.0M.gif" alt="Unitree G1 copying reference poses" width="220"> | <img src="assets/pose_stage1_g1-h1-icub-n1-t1_h1_060pct_36.0M.gif" alt="Unitree H1 copying reference poses" width="220"> | <img src="assets/pose_stage1_g1-h1-icub-n1-t1_n1_060pct_36.0M.gif" alt="Fourier N1 copying reference poses" width="220"> | <img src="assets/pose_stage1_g1-h1-icub-n1-t1_icub_060pct_36.0M.gif" alt="iCub copying reference poses" width="220"> |
+
+*One shared policy driving every robot (`pose_stage1_g1-h1-icub-n1-t1`, 60 % of training, 36 M steps).*
+
 Teaching a simulated Unitree G1 humanoid - and other humanoids (Unitree H1, Booster T1, Fourier N1, or your own) - to copy a person's pose while keeping its balance, with reinforcement learning in MuJoCo. The long-term aim is to drive the robot from a live body tracker, and the first version of that is here: the simulated robot copies the person in front of your webcam. This README covers the simulation, the reinforcement learning and the webcam demo; the `pose/` folder will be documented separately.
 
 ![The simulated G1 following reference poses](assets/following.gif)
